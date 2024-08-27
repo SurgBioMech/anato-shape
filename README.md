@@ -5,3 +5,4 @@ Required libraries:
 * sklearn
 * open3d
 * trimesh
+* plotly (just for viz functions)
