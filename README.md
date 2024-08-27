@@ -13,7 +13,7 @@ Parent Directory: `Z://aorta/aortas`
 
 Cohort Groups e.g., `KK` or `KY` 
 
-Patient ID & Scan Number e.g., `KK1` and `KK1_1` (*"_1" refers to the first scan, "_2" is the second scan, and so on)
+Patient ID & Scan Number e.g., `KK1` and `KK1_1`
 
 Required file holding subfolder: `mesh`
 
