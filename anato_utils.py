@@ -12,6 +12,7 @@ from IPython.display import HTML, display
 
 
 def progress(value, max=100):
+    """A simple progress bar."""
     return HTML("""
         <progress
             value='{value}'
@@ -23,6 +24,7 @@ def progress(value, max=100):
     """.format(value=value, max=max))
     
 def GetFilteredMatMeshPaths(parent_folder, filter_strings, file_filter_strings):
+    """Used to get a list of mesh (in .mat form) file paths and names in the pocivavsek lab directory."""
     filtered_paths = []
     for filter_string in filter_strings:
         specific_folder = os.path.join(parent_folder, filter_string)
@@ -38,6 +40,7 @@ def GetFilteredMatMeshPaths(parent_folder, filter_strings, file_filter_strings):
     return filtered_paths
 
 def GetFilteredParqMeshPaths(parent_folder, filter_strings, file_filter_strings):
+    """Used to get a list of mesh (in .parquet form) file paths and names in the pocivavsek lab directory."""
     filtered_paths = []
     for filter_string in filter_strings:
         specific_folder = os.path.join(parent_folder, filter_string)
@@ -53,6 +56,7 @@ def GetFilteredParqMeshPaths(parent_folder, filter_strings, file_filter_strings)
     return filtered_paths
 
 def GetMeshFromParquet(scan_name):
+    """Used to unpack the mesh data from a parquet file."""
     parquet_data = pd.read_parquet(scan_name)
     svs = parquet_data.iloc[:,:3].dropna().values
     sts = parquet_data.iloc[:,3:6].dropna().values
@@ -61,17 +65,20 @@ def GetMeshFromParquet(scan_name):
     return svs, sts, pcs, mesh_features
 
 def SaveToXLSX(directory, file_name, data):
+    """Save a pandas dataframe as an .xlsx file for anato-shape summary and analysis."""
     os.chdir(directory)
     with pd.ExcelWriter(file_name) as writer:
         data.to_excel(writer, index=False)
         
 def file_name_not_ext(file_name):
+    """To remove file extensions from names."""
     parts = file_name.rsplit(".", 1)
     if len(parts) == 1:
         return file_name
     return parts[0]
 
 def SplitUpScanName(df):
+    """Simply splits the 3 components in the file name into three columns containing each individual part."""
     df['Scan_ID'] = df['Scan_Name'].str.split('_', expand=True, n=2).iloc[:,:2].apply('_'.join, axis=1)
     df_split = df['Scan_Name'].str.split('_', expand=True)
     df_split.columns = ['Patient_ID', 'Scan_Number', 'Mesh_Density']
@@ -79,6 +86,7 @@ def SplitUpScanName(df):
     return df
 
 def Normalize(data, xaxis, yaxis, string):
+    """Normalize all of the data to the mean of the string group."""
     fdf = data[data['Scan_ID'].str.contains(string)]
     xn = np.mean(fdf[xaxis])
     yn = np.mean(fdf[yaxis])
@@ -88,6 +96,7 @@ def Normalize(data, xaxis, yaxis, string):
     return data, xn, yn 
 
 def GroupsNormalize(data, xaxis, yaxis, string):
+    """Normalize each calculation group (unique scale space group) individually, and then concatenate the results together."""
     ndata = pd.DataFrame()
     uv1 = list(data['Mesh_Density'].unique())
     uv2 = list(data['Partition_Prefactor'].unique())
@@ -101,6 +110,7 @@ def GroupsNormalize(data, xaxis, yaxis, string):
     return ndata
 
 def MergeMetaData(directory, file_name, cohort_list, results, cat_columns):
+    """Integrate all available meta data into the results dataframe."""
     os.chdir(directory)
     meta_data = pd.DataFrame()
     for c in cohort_list:
