@@ -26,3 +26,6 @@ Required libraries:
 * open3d
 * trimesh
 * plotly (just for viz functions)
+
+This algorithm is detailed in the following paper: 
+K. Khabaz et al., “The geometric evolution of aortic dissections: Predicting surgical success using fluctuations in integrated Gaussian curvature,” PLOS Computational Biology, vol. 20, no. 2, p. e1011815, Feb. 2024, doi: 10.1371/journal.pcbi.1011815.
