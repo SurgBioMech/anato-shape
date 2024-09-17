@@ -99,11 +99,17 @@ def triangle_indices_vertices(kept_vertices, svs, sts):
 def calc_num_patches(svs, sts, pcs, m):
     """The scaling law used to calculate the number of partitions per manifold."""
     areas = get_areas(svs,sts)
-    R2 = 1 / pcs[:,0]
+    k1 = pcs[:,0]
+    R2 = 1 / k1
     median_R2_squared = np.median(R2)**2
     total_area = np.sum(areas)
-    k = np.round((total_area / median_R2_squared) * m)
-    return int(k)
+    k = m * np.round(total_area / median_R2_squared)
+    if k < len(sts):
+        k = int(k)
+    else:
+        #- in the event of the smallest object gets overdefined by the partitioning scheme
+        k = int(len(sts)) 
+    return k
 
 def calculate_quantities(svs, sts, pcs, quantities, k, cluster_ids):
     """Calculates per-patch curvature quantities and returns as manifold dataframe."""
@@ -245,21 +251,23 @@ def secondary_outlier_exclusion(svs, sts, pcs, mesh_name):
 def Manifold(pcs, svs, sts, scan_name, quantities, m, prm):
     """Core function for partitioning and per-patch curvautre calculations."""
     start_time = time.monotonic()
-    if prm == 'curvature':
-        svsp, stsp, pcsp = primary_outlier_exclusion(svs, sts, pcs, scan_name)
-        svsc, stsc, pscs = secondary_outlier_exclusion(svsp, stsp, pcsp, scan_name)
-    else:
+    if prm == 'thoracic':
         svsc, stsc, pcsc, mask = edge_cleanup(svs, sts, pcs, tol1=0.4, tol2=tol(pcs))
+        print(f'''The {prm} point removal method was employed.''')
+    else:
+        svsp, stsp, pcsp = primary_outlier_exclusion(svs, sts, pcs, scan_name)
+        svsc, stsc, pcsc = secondary_outlier_exclusion(svsp, stsp, pcsp, scan_name)
+        print('The curvature point removal method was employed.')
     
     k = calc_num_patches(svsc, stsc, pcsc, m)
     triangle_COMs = calcCOMs(svsc, stsc)
     km = MiniBatchKMeans(n_clusters=k, max_iter=100, batch_size=1536).fit(triangle_COMs)
     cluster_centers, cluster_ids = km.cluster_centers_, km.labels_
-    
+    print('K-Means done.')
     mesh_quants, patch_areas, num_elem_patch, avg_elem_area = calculate_quantities(
         svsc, stsc, pcsc, quantities, k, cluster_ids)
+    print('Quantities calculated.')
     manifold_df = organize_data(scan_name, k, cluster_centers, mesh_quants, num_elem_patch, avg_elem_area, patch_areas, quantities)
-    
     end_time = time.monotonic()
     print(f'''{scan_name} with {k} patches using m={m} took: {time.strftime('%H:%M:%S', time.gmtime(end_time - start_time))}''')
     return manifold_df, k
