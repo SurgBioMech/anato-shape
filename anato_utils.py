@@ -5,122 +5,82 @@ Utility functions
 @author: joepugar
 """
 
+from pathlib import Path
 import os
 import numpy as np
 import pandas as pd
 from IPython.display import HTML, display
 
-
 def progress(value, max=100):
     """A simple progress bar."""
-    return HTML("""
-        <progress
-            value='{value}'
-            max='{max}',
-            style='width: 100%'
-        >
-            {value}
-        </progress>
-    """.format(value=value, max=max))
+    return HTML(f"""
+        <progress value='{value}' max='{max}' style='width: 100%'>{value}</progress>
+    """)
     
-def GetFilteredMatMeshPaths(parent_folder, filter_strings, file_filter_strings):
-    """Used to get a list of mesh (in .mat form) file paths and names in the pocivavsek lab directory."""
+def GetFilteredMeshPaths(parent_folder, filter_strings, file_filter_strings, ext=".mat"):
+    """Generalized function to get a list of mesh file paths (supports .mat and .parquet formats)."""
     filtered_paths = []
     for filter_string in filter_strings:
-        specific_folder = os.path.join(parent_folder, filter_string)
-        if os.path.exists(specific_folder):
-            for root, dirs, files in os.walk(specific_folder):
+        specific_folder = Path(parent_folder) / filter_string
+        if specific_folder.exists():
+            for root, dirs, _ in os.walk(specific_folder):
                 for dir_name in dirs:
                     if dir_name == 'mesh':
-                        mesh_folder = os.path.join(root, dir_name)
-                        for filename in os.listdir(mesh_folder):
-                            if filename.endswith('.mat') and any(file_filter in filename for file_filter in file_filter_strings):
-                                filtered_paths.append((mesh_folder, filename))
-                                print(f'''Adding {filename}''')
-    return filtered_paths
-
-def GetFilteredParqMeshPaths(parent_folder, filter_strings, file_filter_strings):
-    """Used to get a list of mesh (in .parquet form) file paths and names in the pocivavsek lab directory."""
-    filtered_paths = []
-    for filter_string in filter_strings:
-        specific_folder = os.path.join(parent_folder, filter_string)
-        if os.path.exists(specific_folder):
-            for root, dirs, files in os.walk(specific_folder):
-                for dir_name in dirs:
-                    if dir_name == 'mesh':
-                        mesh_folder = os.path.join(root, dir_name)
-                        for filename in os.listdir(mesh_folder):
-                            if filename.endswith('.parquet') and any(file_filter in filename for file_filter in file_filter_strings):
-                                filtered_paths.append((mesh_folder, filename))
-                                print(f'''Adding {filename}''')
+                        mesh_folder = Path(root) / dir_name
+                        for filename in mesh_folder.iterdir():
+                            if filename.suffix == ext and any(fil in filename.name for fil in file_filter_strings):
+                                filtered_paths.append((str(mesh_folder), filename.name))
+                                print(f"Adding {filename.name}")
     return filtered_paths
 
 def GetMeshFromParquet(scan_name):
-    """Used to unpack the mesh data from a parquet file."""
+    """Unpack the mesh data from a parquet file."""
     parquet_data = pd.read_parquet(scan_name)
-    svs = parquet_data.iloc[:,:3].dropna().values
-    sts = parquet_data.iloc[:,3:6].dropna().values
-    pcs = parquet_data.iloc[:,6:8].dropna().values
-    mesh_features = parquet_data.iloc[:,8:].dropna()
+    svs = parquet_data.iloc[:, :3].values
+    sts = parquet_data.iloc[:, 3:6].values
+    pcs = parquet_data.iloc[:, 6:8].values
+    mesh_features = parquet_data.iloc[:, 8:]
     return svs, sts, pcs, mesh_features
 
 def SaveToXLSX(directory, file_name, data):
-    """Save a pandas dataframe as an .xlsx file for anato-shape summary and analysis."""
-    os.chdir(directory)
-    with pd.ExcelWriter(file_name) as writer:
+    """Save a pandas dataframe as an .xlsx file."""
+    Path(directory).mkdir(parents=True, exist_ok=True)
+    with pd.ExcelWriter(Path(directory) / file_name) as writer:
         data.to_excel(writer, index=False)
         
 def file_name_not_ext(file_name):
-    """To remove file extensions from names."""
-    parts = file_name.rsplit(".", 1)
-    if len(parts) == 1:
-        return file_name
-    return parts[0]
+    """Remove file extensions from names."""
+    return Path(file_name).stem
 
 def SplitUpScanName(df):
-    """Simply splits the 3 components in the file name into three columns containing each individual part."""
-    df['Scan_ID'] = df['Scan_Name'].str.split('_', expand=True, n=2).iloc[:,:2].apply('_'.join, axis=1)
+    """Split the file name into three columns: Patient_ID, Scan_Number, and Mesh_Density."""
     df_split = df['Scan_Name'].str.split('_', expand=True)
     df_split.columns = ['Patient_ID', 'Scan_Number', 'Mesh_Density']
-    df = pd.concat([df, df_split], axis=1)
-    return df
+    df['Scan_ID'] = df_split['Patient_ID'] + '_' + df_split['Scan_Number']
+    return pd.concat([df, df_split], axis=1)
 
 def Normalize(data, xaxis, yaxis, string):
     """Normalize all of the data to the mean of the string group."""
     fdf = data[data['Scan_ID'].str.contains(string)]
-    xn = np.mean(fdf[xaxis])
-    yn = np.mean(fdf[yaxis])
-    data[xaxis+'_Norm'] = data[xaxis]/xn
-    data[yaxis+'_Norm'] = data[yaxis]/yn
-    data['Mean_Radius'] = 1/data[xaxis]
-    return data, xn, yn 
+    xn, yn = fdf[xaxis].mean(), fdf[yaxis].mean()
+    data[f'{xaxis}_Norm'] = data[xaxis] / xn
+    data[f'{yaxis}_Norm'] = data[yaxis] / yn
+    data['Mean_Radius'] = 1 / data[xaxis]
+    return data, xn, yn
 
 def GroupsNormalize(data, xaxis, yaxis, string):
-    """Normalize each calculation group (unique scale space group) individually, and then concatenate the results together."""
+    """Normalize each unique scale space group individually and concatenate results."""
     ndata = pd.DataFrame()
-    uv1 = list(data['Mesh_Density'].unique())
-    uv2 = list(data['Partition_Prefactor'].unique())
-    for i in range(0, len(uv1)):
-        for j in range(0, len(uv2)):
-            c1 = data['Mesh_Density'] == uv1[i]
-            c2 = data['Partition_Prefactor'] == uv2[j]
-            gp = data[c1 & c2]
-            gpn, xn, yn = Normalize(gp, xaxis, yaxis, string)
-            ndata = pd.concat([ndata, gpn], axis=0)
+    for density in data['Mesh_Density'].unique():
+        for prefactor in data['Partition_Prefactor'].unique():
+            group = data[(data['Mesh_Density'] == density) & (data['Partition_Prefactor'] == prefactor)]
+            normalized_group, _, _ = Normalize(group, xaxis, yaxis, string)
+            ndata = pd.concat([ndata, normalized_group], axis=0)
     return ndata
 
 def MergeMetaData(directory, file_name, cohort_list, results, cat_columns):
     """Integrate all available meta data into the results dataframe."""
-    os.chdir(directory)
-    meta_data = pd.DataFrame()
-    for c in cohort_list:
-        data = pd.read_excel(file_name, sheet_name=c)
-        meta_data = pd.concat([meta_data, data], ignore_index=True)
-    results_df = pd.merge(results, meta_data, on='Scan_ID')
-    for cat in cat_columns:
-        results_df[cat]=results_df[[cat]].astype(str)
+    meta_data = pd.concat([pd.read_excel(Path(directory) / file_name, sheet_name=sheet) for sheet in cohort_list], ignore_index=True)
+    results_df = results.merge(meta_data, on='Scan_ID', how='left')
+    results_df[cat_columns] = results_df[cat_columns].astype(str)
     return results_df
-
-
-
-

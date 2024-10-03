@@ -15,29 +15,20 @@ import scipy.io
 from IPython.display import HTML, display
 
 def RotateCoordinateSystem(up, vp, nf):
-    r_new_u = up
-    r_new_v = vp
     npp = np.cross(up, vp) / np.linalg.norm(np.cross(up, vp))
-    ndot = np.dot(nf, np.transpose(npp))
-    if ndot <= -1:
-        r_new_u = -r_new_u
-        r_new_v = -r_new_v
+    ndot = np.clip(np.dot(nf, npp), -1, 1)
+    r_new_u, r_new_v = (up, vp) if ndot > -1 else (-up, -vp)
     perp = nf - ndot * npp
     dperp = (npp + nf) / (1 + ndot)
-    r_new_u = r_new_u - dperp * np.dot(perp, np.transpose(r_new_u))
-    r_new_v = r_new_v - dperp * np.dot(perp, np.transpose(r_new_v))
-    return r_new_u, r_new_v
+    return r_new_u - dperp * np.dot(perp, r_new_u), r_new_v - dperp * np.dot(perp, r_new_v)
 
 def ProjectCurvatureTensor(uf, vf, nf, old_ku, old_kuv, old_kv, up, vp):
     r_new_u, r_new_v = RotateCoordinateSystem(up, vp, nf)
     OldTensor = np.array([[old_ku, old_kuv], [old_kuv, old_kv]])
-    u1 = np.dot(r_new_u, uf)
-    v1 = np.dot(r_new_u, vf)
-    u2 = np.dot(r_new_v, uf)
-    v2 = np.dot(r_new_v, vf)
-    new_ku = np.dot(np.array([u1, v1]), np.dot(OldTensor, np.transpose(np.array([u1, v1]))))
-    new_kuv = np.dot(np.array([u1, v1]), np.dot(OldTensor, np.transpose(np.array([u2, v2]))))
-    new_kv = np.dot(np.array([u2, v2]), np.dot(OldTensor, np.transpose(np.array([u2, v2]))))
+    u1, v1, u2, v2 = np.dot(r_new_u, uf), np.dot(r_new_u, vf), np.dot(r_new_v, uf), np.dot(r_new_v, vf)
+    new_ku = np.dot([u1, v1], np.dot(OldTensor, [u1, v1]))
+    new_kuv = np.dot([u1, v1], np.dot(OldTensor, [u2, v2]))
+    new_kv = np.dot([u2, v2], np.dot(OldTensor, [u2, v2]))
     return new_ku, new_kuv, new_kv
 
 def CalcCurvature(FV, VertexNormals, FaceNormals, Avertex, Acorner, up, vp):
@@ -91,8 +82,7 @@ def GetCurvaturesAndDerivatives(FV):
     return PrincipalCurvature, PrincipalDi1, PrincipalDi2
 
 def CalcFaceNormals(FV):
-    e0 = FV.vertices[FV.faces[:, 2], :] - FV.vertices[FV.faces[:, 1], :]
-    e1 = FV.vertices[FV.faces[:, 0], :] - FV.vertices[FV.faces[:, 2], :]
+    e0, e1 = FV.vertices[FV.faces[:, 2]] - FV.vertices[FV.faces[:, 1]], FV.vertices[FV.faces[:, 0]] - FV.vertices[FV.faces[:, 2]]
     return normr(np.cross(e0, e1))
 
 def normr0(X):
@@ -104,8 +94,7 @@ def normr0(X):
         return np.dot(np.reshape(np.transpose(np.sqrt(1 / somme_colonnes(np.transpose(X ** 2)))), (b, 1)), np.ones((1, a))) * X
     
 def normr(matrix):
-    norms = np.linalg.norm(matrix, axis=1, keepdims=True)
-    return matrix / norms
+    return matrix / np.linalg.norm(matrix, axis=1, keepdims=True)
 
 def CalcVertexNormals(FV, N):
     #- get all edge vectors 
@@ -225,8 +214,8 @@ def createFV(vertices, triangles):
     FV.faces = triangles
     return FV
 
-def aorta_curv_group(parent_path, group_str, file_str, ext_str):
-    paths = GetFilteredMatMeshPaths(parent_path, group_str, file_str)
+def anato_curv_group(parent_path, group_str, file_str, ext_str):
+    paths = GetFilteredMeshPaths(parent_path, group_str, file_str)
     total_files = len(paths)
     out = display(progress(0, total_files - 1), display_id=True)
     t = 0
