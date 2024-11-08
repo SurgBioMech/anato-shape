@@ -9,6 +9,7 @@ from pathlib import Path
 import os
 import numpy as np
 import pandas as pd
+import trimesh
 from IPython.display import HTML, display
 
 def progress(value, max=100):
@@ -36,17 +37,31 @@ def GetFilteredMeshPaths(parent_folder, filter_strings, file_filter_strings, ext
 def GetMeshFromParquet(scan_name):
     """Unpack the mesh data from a parquet file."""
     parquet_data = pd.read_parquet(scan_name)
-    svs = parquet_data.iloc[:, :3].values
-    sts = parquet_data.iloc[:, 3:6].values
-    pcs = parquet_data.iloc[:, 6:8].values
-    mesh_features = parquet_data.iloc[:, 8:]
-    return svs, sts, pcs, mesh_features
+    v = parquet_data.iloc[:, :3].dropna().values
+    f = parquet_data.iloc[:, 3:6].dropna().values
+    mesh = trimesh.Trimesh(vertices=v, faces=f)
+    pcs = parquet_data.iloc[:, 6:8].dropna().values
+    mesh.curvatures = pcs
+    return mesh
 
-def SaveToXLSX(directory, file_name, data):
+def SaveResultsToXLSX(directory, file_name, data):
     """Save a pandas dataframe as an .xlsx file."""
     Path(directory).mkdir(parents=True, exist_ok=True)
     with pd.ExcelWriter(Path(directory) / file_name) as writer:
         data.to_excel(writer, index=False)
+        
+def SaveScanDictToXLSX(directory, file_name, scan_dict, j):
+    """Save a dictionary as an .xlsx file."""
+    Path(directory).mkdir(parents=True, exist_ok=True)
+    with pd.ExcelWriter(Path(directory) / file_name) as writer:
+        for main_key, sub_dict in scan_dict.items():
+            data = []
+            for key, values, in sub_dict.items():
+                df = pd.DataFrame(values)
+                df['key'] = key
+                data.append(df)
+            output_df = pd.concat(data, ignore_index=True)
+            output_df.to_excel(writer, sheet_name=str(main_key), index=False)
         
 def file_name_not_ext(file_name):
     """Remove file extensions from names."""

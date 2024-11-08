@@ -31,30 +31,31 @@ def ProjectCurvatureTensor(uf, vf, nf, old_ku, old_kuv, old_kv, up, vp):
     new_kv = np.dot([u2, v2], np.dot(OldTensor, [u2, v2]))
     return new_ku, new_kuv, new_kv
 
-def CalcCurvature(FV, VertexNormals, FaceNormals, Avertex, Acorner, up, vp):
+def CalcCurvature(mesh, VertexNormals, FaceNormals, Avertex, Acorner, up, vp):
     #- matrix of each face at each cell
+    v, f = mesh.vertices, mesh.faces 
     FaceSFM, VertexSFM = list(), list()
-    for i in range(FV.faces.shape[0]):
+    for i in range(f.shape[0]):
         FaceSFM.append([[0, 0], [0, 0]])
-    for i in range(FV.vertices.shape[0]):
+    for i in range(v.shape[0]):
         VertexSFM.append([[0, 0], [0, 0]])
-    Kn = np.zeros((1, FV.faces.shape[0]))
+    Kn = np.zeros((1, f.shape[0]))
     #- get all edge vectors 
-    e0 = FV.vertices[FV.faces[:, 2], :] - FV.vertices[FV.faces[:, 1], :]
-    e1 = FV.vertices[FV.faces[:, 0], :] - FV.vertices[FV.faces[:, 2], :]
-    e2 = FV.vertices[FV.faces[:, 1], :] - FV.vertices[FV.faces[:, 0], :]
+    e0 = v[f[:, 2], :] - v[f[:, 1], :]
+    e1 = v[f[:, 0], :] - v[f[:, 2], :]
+    e2 = v[f[:, 1], :] - v[f[:, 0], :]
     e0_norm = normr(e0)
-    wfp = np.array(np.zeros((FV.faces.shape[0], 3)))
+    wfp = np.array(np.zeros((f.shape[0], 3)))
     #- calculate curvature per face & set face coordinate frame 
-    for i in range(FV.faces.shape[0]):
+    for i in range(f.shape[0]):
         nf = FaceNormals[i, :]
         t = e0_norm[i, :]
         B = np.cross(nf, t)
         B = B / (np.linalg.norm(B))
         #- extract relevant normals in face vertices 
-        n0 = VertexNormals[FV.faces[i][0], :]
-        n1 = VertexNormals[FV.faces[i][1], :]
-        n2 = VertexNormals[FV.faces[i][2], :]
+        n0 = VertexNormals[f[i][0], :]
+        n1 = VertexNormals[f[i][1], :]
+        n2 = VertexNormals[f[i][2], :]
         #- solve least squares problem of th form Ax=b
         A = np.array([[np.dot(e0[i, :], t), np.dot(e0[i, :], B), 0], [0, np.dot(e0[i, :], t), np.dot(e0[i, :], B)],
                       [np.dot(e1[i, :], t), np.dot(e1[i, :], B), 0], [0, np.dot(e1[i, :], t), np.dot(e1[i, :], B)],
@@ -64,25 +65,26 @@ def CalcCurvature(FV, VertexNormals, FaceNormals, Avertex, Acorner, up, vp):
         FaceSFM[i] = np.array([[x[0][0], x[0][1]], [x[0][1], x[0][2]]])
         Kn[0][i] = np.dot(np.array([1, 0]), np.dot(FaceSFM[i], np.array([[1.], [0.]])))
         #- calculate curvature per vertex
-        wfp[i][0] = Acorner[i][0] / Avertex[FV.faces[i][0]]
-        wfp[i][1] = Acorner[i][1] / Avertex[FV.faces[i][1]]
-        wfp[i][2] = Acorner[i][2] / Avertex[FV.faces[i][2]]
+        wfp[i][0] = Acorner[i][0] / Avertex[f[i][0]]
+        wfp[i][1] = Acorner[i][1] / Avertex[f[i][1]]
+        wfp[i][2] = Acorner[i][2] / Avertex[f[i][2]]
         #- calculate new coordinate system and project the tensor 
         for j in range(3):
             new_ku, new_kuv, new_kv = ProjectCurvatureTensor(t, B, nf, x[0][0], x[0][1], x[0][2],
-                                               up[FV.faces[i][j], :], vp[FV.faces[i][j], :])
-            VertexSFM[FV.faces[i][j]] += np.dot(wfp[i][j], np.array([[new_ku, new_kuv], [new_kuv, new_kv]]))
+                                               up[f[i][j], :], vp[f[i][j], :])
+            VertexSFM[f[i][j]] += np.dot(wfp[i][j], np.array([[new_ku, new_kuv], [new_kuv, new_kv]]))
     return FaceSFM, VertexSFM, wfp
 
-def GetCurvaturesAndDerivatives(FV):
-    FaceNormals = CalcFaceNormals(FV)
-    (VertexNormals, Avertex, Acorner, up, vp) = CalcVertexNormals(FV, FaceNormals)
-    (FaceSFM, VertexSFM, wfp) = CalcCurvature(FV, VertexNormals, FaceNormals, Avertex, Acorner, up, vp)
-    [PrincipalCurvature, PrincipalDi1, PrincipalDi2] = getPrincipalCurvatures(FV, VertexSFM, up, vp)
+def GetCurvaturesAndDerivatives(mesh):
+    FaceNormals = CalcFaceNormals(mesh)
+    (VertexNormals, Avertex, Acorner, up, vp) = CalcVertexNormals(mesh, FaceNormals)
+    (FaceSFM, VertexSFM, wfp) = CalcCurvature(mesh, VertexNormals, FaceNormals, Avertex, Acorner, up, vp)
+    [PrincipalCurvature, PrincipalDi1, PrincipalDi2] = getPrincipalCurvatures(mesh, VertexSFM, up, vp)
     return PrincipalCurvature, PrincipalDi1, PrincipalDi2
 
-def CalcFaceNormals(FV):
-    e0, e1 = FV.vertices[FV.faces[:, 2]] - FV.vertices[FV.faces[:, 1]], FV.vertices[FV.faces[:, 0]] - FV.vertices[FV.faces[:, 2]]
+def CalcFaceNormals(mesh):
+    v, f = mesh.vertices, mesh.faces 
+    e0, e1 = v[f[:, 2]] - v[f[:, 1]], v[f[:, 0]] - v[f[:, 2]]
     return normr(np.cross(e0, e1))
 
 def normr0(X):
@@ -96,11 +98,12 @@ def normr0(X):
 def normr(matrix):
     return matrix / np.linalg.norm(matrix, axis=1, keepdims=True)
 
-def CalcVertexNormals(FV, N):
+def CalcVertexNormals(mesh, N):
+    v, f = mesh.vertices, mesh.faces 
     #- get all edge vectors 
-    e0 = np.array(FV.vertices[FV.faces[:, 2], :] - FV.vertices[FV.faces[:, 1], :])
-    e1 = np.array(FV.vertices[FV.faces[:, 0], :] - FV.vertices[FV.faces[:, 2], :])
-    e2 = np.array(FV.vertices[FV.faces[:, 1], :] - FV.vertices[FV.faces[:, 0], :])
+    e0 = np.array(v[f[:, 2], :] - v[f[:, 1], :])
+    e1 = np.array(v[f[:, 0], :] - v[f[:, 2], :])
+    e2 = np.array(v[f[:, 1], :] - v[f[:, 0], :])
     e0_norm = normr(e0)
     e1_norm = normr(e1)
     e2_norm = normr(e2)
@@ -119,19 +122,19 @@ def CalcVertexNormals(FV, N):
     s = (de0 + de1 + de2) / 2
     Af = np.sqrt(s * (s - de0) * (s - de1) * (s - de2))
     #- calculate weights 
-    Acorner = np.zeros((np.shape(FV.faces)[0], 3))
-    Avertex = np.zeros((np.shape(FV.vertices)[0], 1))
+    Acorner = np.zeros((np.shape(f)[0], 3))
+    Avertex = np.zeros((np.shape(v)[0], 1))
     #- calculate vertex normals 
-    VertexNormals, up, vp = np.zeros((np.shape(FV.vertices)[0], 3)), np.zeros((np.shape(FV.vertices)[0], 3)), np.zeros(
-        (np.shape(FV.vertices)[0], 3))
+    VertexNormals, up, vp = np.zeros((np.shape(v)[0], 3)), np.zeros((np.shape(v)[0], 3)), np.zeros(
+        (np.shape(v)[0], 3))
     #- calculate weights according to N.Max [1999]
-    for i in range(np.shape(FV.faces)[0]):
+    for i in range(np.shape(f)[0]):
         wfv1 = Af[i] / ((de1[i] ** 2) * (de2[i] ** 2))
         wfv2 = Af[i] / ((de0[i] ** 2) * (de2[i] ** 2))
         wfv3 = Af[i] / ((de1[i] ** 2) * (de0[i] ** 2))
-        VertexNormals[FV.faces[i][0], :] += wfv1 * N[i, :]
-        VertexNormals[FV.faces[i][1], :] += wfv2 * N[i, :]
-        VertexNormals[FV.faces[i][2], :] += wfv3 * N[i, :]
+        VertexNormals[f[i][0], :] += wfv1 * N[i, :]
+        VertexNormals[f[i][1], :] += wfv2 * N[i, :]
+        VertexNormals[f[i][2], :] += wfv3 * N[i, :]
         #- calculate areas for weights according to Meyer et al [2002]
         #- check if the triange is obtuse, right or acute
         if ew[0][i] <= 0:
@@ -151,24 +154,25 @@ def CalcVertexNormals(FV, N):
             Acorner[i][0] = ewscale * (ew[1][i] + ew[2][i])
             Acorner[i][1] = ewscale * (ew[0][i] + ew[2][i])
             Acorner[i][2] = ewscale * (ew[1][i] + ew[0][i])
-        Avertex[FV.faces[i][0]] += Acorner[i][0]
-        Avertex[FV.faces[i][1]] += Acorner[i][1]
-        Avertex[FV.faces[i][2]] += Acorner[i][2]
+        Avertex[f[i][0]] += Acorner[i][0]
+        Avertex[f[i][1]] += Acorner[i][1]
+        Avertex[f[i][2]] += Acorner[i][2]
         #- calculate initial coordate system 
-        up[FV.faces[i][0], :] = e2_norm[i, :]
-        up[FV.faces[i][1], :] = e0_norm[i, :]
-        up[FV.faces[i][2], :] = e1_norm[i, :]
+        up[f[i][0], :] = e2_norm[i, :]
+        up[f[i][1], :] = e0_norm[i, :]
+        up[f[i][2], :] = e1_norm[i, :]
     VertexNormals = normr(VertexNormals)
-    for i in range(np.shape(FV.vertices)[0]):
+    for i in range(np.shape(v)[0]):
         up[i, :] = np.cross(up[i, :], VertexNormals[i, :])
         up[i, :] = up[i, :] / np.linalg.norm(up[i, :])
         vp[i, :] = np.cross(VertexNormals[i, :], up[i, :])
     return VertexNormals, Avertex, Acorner, up, vp
 
-def getPrincipalCurvatures(FV, VertexSFM, up, vp):
-    PrincipalCurvature = np.zeros((2, np.shape(FV.vertices)[0]))
-    PrincipalDi1, PrincipalDi2 = [np.zeros((np.shape(FV.vertices)[0], 3)), np.zeros((np.shape(FV.vertices)[0], 3))]
-    for i in range(np.shape(FV.vertices)[0]):
+def getPrincipalCurvatures(mesh, VertexSFM, up, vp):
+    v, f = mesh.vertices, mesh.faces 
+    PrincipalCurvature = np.zeros((2, np.shape(v)[0]))
+    PrincipalDi1, PrincipalDi2 = [np.zeros((np.shape(v)[0], 3)), np.zeros((np.shape(v)[0], 3))]
+    for i in range(np.shape(v)[0]):
         npp = np.cross(up[i, :], vp[i, :])
         r_old_u, r_old_v = RotateCoordinateSystem(up[i, :], vp[i, :], npp)
         ku = VertexSFM[i][0][0]
@@ -203,24 +207,13 @@ def somme_colonnes(X):
         xx.append(sum(X[:, i]))
     return np.array(xx)
 
-class FVStructure:
-    def __init__(self):
-        self.vertices = None
-        self.faces = None
-        
-def createFV(vertices, triangles):
-    FV = FVStructure()
-    FV.vertices = vertices
-    FV.faces = triangles
-    return FV
-
 def anato_curv_group(parent_path, group_str, file_str, ext_str):
     paths = GetFilteredMeshPaths(parent_path, group_str, file_str)
     total_files = len(paths)
     out = display(progress(0, total_files - 1), display_id=True)
     t = 0
     for i in range(total_files):
-        progress(i, total_files)  #- update progress bar
+        progress(i, total_files)
         os.chdir(paths[i][0])
         mat_file = scipy.io.loadmat(paths[i][1])
         for vkey in mat_file:
@@ -230,38 +223,17 @@ def anato_curv_group(parent_path, group_str, file_str, ext_str):
             if '_surface_triangles' in tkey and '_surface_triangles_' not in tkey:
                 sts = mat_file[tkey]-1 
         mesh = trimesh.Trimesh(vertices=svs, faces=sts)
-        #- re-zeroing is necessary for edge_cleanup to work in the next module
-        #- however, it will ruin any calculations with centerline data
-        mesh.rezero()  
-        vert_new = mesh.vertices
-        tri_new = mesh.faces
-        mesh_area = mesh.area
-        mesh_volume = mesh.volume
-        eul = mesh.edges_unique_length 
-        faa = mesh.face_adjacency_angles
-        fa = mesh.face_angles
-        euler = mesh.euler_number
-        mi_mag = np.linalg.norm(mesh.moment_inertia)
-        mesh_feats_dict = {'Mesh_Area':mesh_area,
-                           'Mesh_Volume':mesh_volume,
-                           'Mean_Edge_Length':np.mean(eul),
-                           'Mean_Face_Angle':np.mean(faa),
-                           'Mean_Vertex_Angle':np.mean(fa),
-                           'Euler_Number':euler,
-                           'Moment_Inertia_Mag':mi_mag}
-        mesh_feats = pd.DataFrame(mesh_feats_dict, index=[0])
-        FV = createFV(vert_new, tri_new)
         try:
-            PrincipalCurvatures, PrincipalDi1, PrincipalDi2 = GetCurvaturesAndDerivatives(FV)
+            PrincipalCurvatures, PrincipalDi1, PrincipalDi2 = GetCurvaturesAndDerivatives(mesh)
         except np.linalg.LinAlgError as e:
             print(f"LinAlg Error: SVD did not converge for file {paths[i][1]}. Skipping this scan.")
             continue  #- skip this iteration if SVD did not converge
         PCS_array = np.array(PrincipalCurvatures.T)
         new_file_name = paths[i][1][:-4] + ext_str + '.parquet'
-        vertices = pd.DataFrame(vert_new, columns=['X','Y','Z'])
-        triangles = pd.DataFrame(tri_new, columns=['T1','T2','T3'])
+        vertices = pd.DataFrame(mesh.vertices, columns=['X','Y','Z'])
+        triangles = pd.DataFrame(mesh.faces, columns=['T1','T2','T3'])
         curvatures = pd.DataFrame(PCS_array, columns=['K1', 'K2'])
-        concatenated_data = pd.concat([vertices, triangles, curvatures, mesh_feats], axis=1)
+        concatenated_data = pd.concat([vertices, triangles, curvatures], axis=1)
         concatenated_data.to_parquet(new_file_name, compression='gzip', index=False)
         t += 1
         out.update(progress(t, total_files))
