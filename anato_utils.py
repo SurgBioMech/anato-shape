@@ -50,7 +50,7 @@ def SaveResultsToXLSX(directory, file_name, data):
     with pd.ExcelWriter(Path(directory) / file_name) as writer:
         data.to_excel(writer, index=False)
         
-def SaveScanDictToXLSX(directory, file_name, scan_dict, j):
+def SaveScanDictToXLSX(directory, file_name, scan_dict):
     """Save a dictionary as an .xlsx file."""
     Path(directory).mkdir(parents=True, exist_ok=True)
     with pd.ExcelWriter(Path(directory) / file_name) as writer:

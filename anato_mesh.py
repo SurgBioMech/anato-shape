@@ -201,11 +201,19 @@ def clean_mesh(mesh, mesh_name=None):
 def Manifold(mesh, scan_name, quantities, m, prm):
     """Core function for partitioning and per-patch curvature calculations."""
     #Need to eventually replace/fix this 'thoracic' version of the cleanup options. 
+    
     if prm == 'thoracic':
-        mesh_clean, _ = edge_cleanup(mesh, tol1=0.4, tol2=tol(pcs))
-    else:
+        mesh_clean, _ = edge_cleanup(mesh, tol1=0.4, tol2=tol(mesh.curvatures))
+    if prm == 'curvature':
         mesh_clean = clean_mesh(mesh, mesh_name=scan_name)
-    k = calc_num_patches(mesh_clean, m)
+    else:
+        mesh_clean = mesh
+    
+    if m > 10:
+        k = m
+    else: 
+        k = calc_num_patches(mesh_clean, m)
+    
     triangle_COMs = calcCOMs(mesh_clean)
     km = MiniBatchKMeans(n_clusters=k, max_iter=100, batch_size=1536).fit(triangle_COMs)
     mesh_quants, patch_areas, num_elem_patch, avg_elem_area = calculate_quantities(mesh_clean, quantities, k, km.labels_)
