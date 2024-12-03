@@ -226,7 +226,7 @@ def ProcessManifold(path, quantities, m, progress_queue, prm):
     mesh = GetMeshFromParquet(full_scan_path)
     scan_name_no_ext = file_name_not_ext(scan_name)
     manifold_df, patches, mesh_clean = Manifold(mesh, quantities=quantities, m=m, scan_name=scan_name, prm=prm)
-    scan_features = pd.DataFrame({
+    scan_features = pd.concat([pd.DataFrame({
         'ScanName': [scan_name_no_ext],
         'AvElemPatch': [np.mean(manifold_df['Num_Elem_per_Patch'])],
         'AvElemArea': [np.mean(manifold_df['Avg_Elem_per_Area'])],
@@ -238,8 +238,8 @@ def ProcessManifold(path, quantities, m, progress_queue, prm):
         'MeanFaceAngle': [np.mean(mesh_clean.face_adjacency_angles)],
         'MeanVertexAngle': [np.mean(mesh_clean.face_angles)],
         'EulerNumber': [mesh.euler_number],
-        'MomentInertia': [np.linalg.norm(mesh_clean.moment_inertia)]
-    })
+        'MomentInertia': [np.linalg.norm(mesh_clean.moment_inertia)],
+    }), GetStatFeatures(manifold_df, quantities)], axis=1)
     progress_queue.put(m)
     return scan_features, manifold_df
 
