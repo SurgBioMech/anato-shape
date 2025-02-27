@@ -69,7 +69,7 @@ def file_name_not_ext(file_name):
 
 def SplitUpScanName(df):
     """Split the file name into three columns: Patient_ID, Scan_Number, and Mesh_Density."""
-    df_split = df['Scan_Name'].str.split('_', expand=True)
+    df_split = df['ScanName'].str.split('_', expand=True)
     df_split.columns = ['Patient_ID', 'Scan_Number', 'Mesh_Density']
     df['Scan_ID'] = df_split['Patient_ID'] + '_' + df_split['Scan_Number']
     return pd.concat([df, df_split], axis=1)
