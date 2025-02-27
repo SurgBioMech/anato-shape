@@ -30,7 +30,9 @@ class Curvatures:
     def IntMeanSquared(self):
         return self.Mean()**2 * self.ta
     def Willmore(self):
-        return 4 * self.IntMeanSquared() - 2 * self.IntGaussian()
+        return 4 * self.Mean()**2 - 2 * self.Gaussian()
+    def IntWillmore(self):
+        return self.Willmore() * self.ta
     def Casorati(self):
         return np.mean(np.sqrt(0.5 * (self.k1**2 + self.k2**2)))
     def ShapeIndex(self):
@@ -200,21 +202,33 @@ def clean_mesh(mesh, mesh_name=None):
 
 def Manifold(mesh, scan_name, quantities, m, prm):
     """Core function for partitioning and per-patch curvature calculations."""
-    #Need to eventually replace/fix this 'thoracic' version of the cleanup options. 
-    
-    if prm == 'thoracic':
-        mesh_clean, _ = edge_cleanup(mesh, tol1=0.4, tol2=tol(mesh.curvatures))
     if prm == 'curvature':
         mesh_clean = clean_mesh(mesh, mesh_name=scan_name)
     else:
         mesh_clean = mesh
     
-    if m > 10:
-        k = m
-    else: 
-        k = calc_num_patches(mesh_clean, m)
-    
     triangle_COMs = calcCOMs(mesh_clean)
+    num_faces = len(mesh_clean.faces)
+    
+    #Fixed Patches
+    if m > 10:
+        if m >= num_faces:
+            k = num_faces  # Ensure k does not exceed available points
+            print(f'''For {scan_name}, num_patches overwritten to {k} to match {num_faces} elements due to insufficient points.''')
+        else:
+            k = m
+            print(f'''For {scan_name}, num_patches set to {k} with {num_faces} elements.''')
+
+    # Floating Patches
+    else:
+        calc_k = calc_num_patches(mesh_clean, m)
+        if calc_k >= num_faces:
+            k = num_faces  # Prevent exceeding available points
+            print(f'''For {scan_name}, num_patches overwritten to {k} to match {num_faces} elements due to insufficient points.''')
+        else:
+            k = calc_k
+            print(f'''For {scan_name}, num_patches set to {k} with {num_faces} elements.''')
+
     km = MiniBatchKMeans(n_clusters=k, max_iter=100, batch_size=1536).fit(triangle_COMs)
     mesh_quants, patch_areas, num_elem_patch, avg_elem_area = calculate_quantities(mesh_clean, quantities, k, km.labels_)
     return organize_data(scan_name, k, km.cluster_centers_, mesh_quants, num_elem_patch, avg_elem_area, patch_areas, quantities), k, mesh_clean
@@ -226,14 +240,26 @@ def ProcessManifold(path, quantities, m, progress_queue, prm):
     mesh = GetMeshFromParquet(full_scan_path)
     scan_name_no_ext = file_name_not_ext(scan_name)
     manifold_df, patches, mesh_clean = Manifold(mesh, quantities=quantities, m=m, scan_name=scan_name, prm=prm)
+    A, As, V, k1, k2 = mesh_clean.area, mesh_clean.area_faces, mesh_clean.volume, mesh_clean.curvatures[:,0], mesh_clean.curvatures[:,1]
+    vertex_areas = np.zeros(len(mesh_clean.vertices))
+    for vertex_idx in range(len(mesh_clean.vertices)):
+        connected_faces = np.where(mesh_clean.faces == vertex_idx)[0]
+        vertex_areas[vertex_idx] = As[connected_faces].sum() / len(connected_faces)
+    As = vertex_areas
     scan_features = pd.concat([pd.DataFrame({
         'ScanName': [scan_name_no_ext],
         'AvElemPatch': [np.mean(manifold_df['Num_Elem_per_Patch'])],
         'AvElemArea': [np.mean(manifold_df['Avg_Elem_per_Area'])],
         'AvPatchArea': [np.mean(manifold_df['Patch_Area'])],
         'Num_Patches': [patches],
-        'SurfaceArea': [mesh_clean.area],
-        'Volume': [mesh.volume],
+        'SurfaceArea': [A],
+        'Volume': [V],
+        'Flatness_Index': [A**3/V**2],
+        'Sphericity_Index': [4.836 * V**(2/3) / A],
+        'GLN': [(1/(4*np.pi)) * np.sqrt(A * np.sum((k1*k2)**2 * As))],
+        'GAA': [np.sum(k1*k2*As)/A],
+        'MLN': [(1/(4*np.pi)) * np.sqrt(np.sum((0.5*(k1+k2))**2 * As))],
+        'MAA': [np.sum((0.5*(k1+k2))*As)/A],
         'MeanEdgeLength': [np.mean(mesh_clean.edges_unique_length)],
         'MeanFaceAngle': [np.mean(mesh_clean.face_adjacency_angles)],
         'MeanVertexAngle': [np.mean(mesh_clean.face_angles)],
@@ -289,7 +315,7 @@ def process_m_with_progress(m, manifold_group):
     data['Partition_Prefactor'] = str(m)
     return data
 
-def GetAnatoMeshResults(parent_folder, filter_strings, file_filter_strings, prm='other', quantities=['Gaussian'], m_set=[1.0]):
+def GetAnatoMeshResults(parent_folder, filter_strings, file_filter_strings, prm=None, quantities=['Gaussian'], m_set=[1.0]):
     """Top most function."""
     print("Organizing paths and file names:")
     paths = GetFilteredMeshPaths(parent_folder, filter_strings, file_filter_strings, ext=".parquet")

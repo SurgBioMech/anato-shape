@@ -11,6 +11,7 @@ from anato_utils import *
 import pandas as pd
 import trimesh 
 import numpy as np
+from scipy.spatial import cKDTree
 import scipy.io
 from IPython.display import HTML, display
 
@@ -207,7 +208,79 @@ def somme_colonnes(X):
         xx.append(sum(X[:, i]))
     return np.array(xx)
 
-def anato_curv_group(parent_path, group_str, file_str, ext_str):
+def ProcessMeshFile(mat_file):
+    keys = []
+    for key in mat_file:
+        keys.append(key)
+    svs_all = mat_file[keys[3]]
+    sts_all = mat_file[keys[4]] - 1
+    part_mask1 = mat_file[keys[5]]==1
+    part_mask2 = mat_file[keys[5]]==2
+    sts1 = sts_all[part_mask1.ravel()]
+    sts2 = sts_all[part_mask2.ravel()]
+    vertices_part1 = svs_all[np.unique(sts1)]
+    vertices_part2 = svs_all[np.unique(sts2)]
+    tree_part2 = cKDTree(vertices_part2)
+    distances, _ = tree_part2.query(vertices_part1, distance_upper_bound=1e-6)
+    mask = np.isinf(distances)
+    filtered_vertices = vertices_part1[mask]
+    vertex_map = {tuple(v): i for i, v in enumerate(filtered_vertices)}
+    kept_vertex_indices = np.array([vertex_map[tuple(v)] for v in filtered_vertices])   
+    new_triangles = []
+    for tri in sts1:
+        if all(tuple(svs_all[v]) in vertex_map for v in tri):
+            new_tri = [vertex_map[tuple(svs_all[v])] for v in tri]
+            new_triangles.append(new_tri)
+    new_triangles = np.array(new_triangles)
+    mesh = trimesh.Trimesh(vertices=filtered_vertices, faces=new_triangles)
+    return mesh
+        
+def anato_clean_group(parent_path, group_str, file_str, ext_str):
+    paths = GetFilteredMeshPaths(parent_path, group_str, file_str)
+    total_files = len(paths)
+    out = display(progress(0, total_files - 1), display_id=True)
+    t = 0
+    for i in range(total_files):
+        progress(i, total_files)
+        os.chdir(paths[i][0])
+        mat_file = scipy.io.loadmat(paths[i][1])
+        mesh = ProcessMeshFile(mat_file)
+        new_file_name = paths[i][1][:-4] + ext_str + '.parquet'
+        vertices = pd.DataFrame(mesh.vertices, columns=['X','Y','Z'])
+        triangles = pd.DataFrame(mesh.faces, columns=['T1','T2','T3'])
+        concatenated_data = pd.concat([vertices, triangles], axis=1)
+        concatenated_data.to_parquet(new_file_name, compression='gzip', index=False)
+        t += 1
+        out.update(progress(t, total_files))
+        print(f'''Saved {paths[i][1][:-4] + ext_str}.parquet to {paths[i][0]}''')
+
+def anato_curv_group_wRemoval(parent_path, group_str, file_str, ext_str):
+    paths = GetFilteredMeshPaths(parent_path, group_str, file_str)
+    total_files = len(paths)
+    out = display(progress(0, total_files - 1), display_id=True)
+    t = 0
+    for i in range(total_files):
+        progress(i, total_files)
+        os.chdir(paths[i][0])
+        mat_file = scipy.io.loadmat(paths[i][1])
+        mesh = ProcessMeshFile(mat_file)
+        try:
+            PrincipalCurvatures, PrincipalDi1, PrincipalDi2 = GetCurvaturesAndDerivatives(mesh)
+        except np.linalg.LinAlgError as e:
+            print(f"LinAlg Error: SVD did not converge for file {paths[i][1]}. Skipping this scan.")
+            continue  #- skip this iteration if SVD did not converge
+        PCS_array = np.array(PrincipalCurvatures.T)
+        new_file_name = paths[i][1][:-4] + ext_str + '.parquet'
+        vertices = pd.DataFrame(mesh.vertices, columns=['X','Y','Z'])
+        triangles = pd.DataFrame(mesh.faces, columns=['T1','T2','T3'])
+        curvatures = pd.DataFrame(PCS_array, columns=['K1', 'K2'])
+        concatenated_data = pd.concat([vertices, triangles, curvatures], axis=1)
+        concatenated_data.to_parquet(new_file_name, compression='gzip', index=False)
+        t += 1
+        out.update(progress(t, total_files))
+        print(f'''Saved {paths[i][1][:-4] + ext_str}.parquet to {paths[i][0]}''')
+
+def anato_curv_group_old_woRemoval(parent_path, group_str, file_str, ext_str):
     paths = GetFilteredMeshPaths(parent_path, group_str, file_str)
     total_files = len(paths)
     out = display(progress(0, total_files - 1), display_id=True)
