@@ -9,6 +9,7 @@ import numpy as np
 import plotly
 import plotly.graph_objects as go
 import plotly.colors
+import os
 from anato_utils import *
 from anato_mesh import *
 
@@ -71,22 +72,35 @@ def mesh_plot(mesh, mesh_color='lightblue', mesh_opacity=0.7, grid_color='black'
     #fig.write_image('mesh_fig.png', format='png', scale=2, engine='kaleido')
     fig.show()
     
-def patch_plot(mesh, manifold_df, cluster_ids, var, scan_name, color_scale='Plasma', mesh_opacity=0.7, edge_thickness=3):
+def patch_plot(mesh, manifold_df, cluster_ids, var, scan_name, color_scale='Plasma', mesh_opacity=0.7, edge_thickness=3,cmin=None,cmax=None):
     """Interactive 3D mesh plot of the anatomy with colored partitions for surface curvature values and a color bar."""
     v = mesh.vertices
     f = mesh.faces
     min_value = manifold_df[var].min()
     max_value = manifold_df[var].max()
-    
-    color_map = {cluster_id: plotly.colors.sample_colorscale(color_scale, (value - min_value) / (max_value - min_value))[0]
-                 for cluster_id, value in zip(manifold_df.index, manifold_df[var])}
-    face_colors = np.array([color_map[cluster_id] for cluster_id in cluster_ids])
-    
+
+    intensity_vals = manifold_df.loc[cluster_ids, var].values
+
     fig = go.Figure()
-    mesh_trace = go.Mesh3d(x=v[:, 0], y=v[:, 1], z=v[:, 2],
-                           i=f[:, 0], j=f[:, 1], k=f[:, 2],
-                           facecolor=face_colors, opacity=mesh_opacity, flatshading=True,
+    mesh_trace = go.Mesh3d(
+        x=v[:, 0], y=v[:, 1], z=v[:, 2],
+        i=f[:, 0], j=f[:, 1], k=f[:, 2],
+        intensity=intensity_vals,          
+        intensitymode='cell',
+        colorscale=color_scale,
+        cmin=min_value,
+        cmax=max_value,
+        opacity=mesh_opacity,
+        flatshading=True,
+        showscale=True,                    # colourbar for this trace
+        colorbar=dict(
+            title=var,
+            titleside='right',
+            ticks='outside',
+            len=0.75
+        ),
     )
+
     fig.add_trace(mesh_trace)
     edge_x, edge_y, edge_z, edge_set = [], [], [], {}
 
@@ -101,29 +115,14 @@ def patch_plot(mesh, manifold_df, cluster_ids, var, scan_name, color_scale='Plas
             else:
                 edge_set[edge] = cluster_id
 
-    edge_trace = go.Scatter3d(x=edge_x, y=edge_y, z=edge_z,
-        mode='lines', line=dict(color='black', width=edge_thickness), hoverinfo='none'
+    fig.add_trace(
+        go.Scatter3d(
+            x=edge_x, y=edge_y, z=edge_z,
+            mode='lines',
+            line=dict(color='black', width=edge_thickness),
+            hoverinfo='none'
+        )
     )
-    fig.add_trace(edge_trace)
-
-    colorbar_trace = go.Scatter3d(
-        x=[None], y=[None], z=[None], 
-        mode='markers',
-        marker=dict(
-            colorscale=color_scale,
-            cmin=min_value,   
-            cmax=max_value,    
-            colorbar=dict(
-                title=var,
-                titleside='right',
-                ticks='outside',
-                len=0.75
-            ),
-            size=0.0001
-        ),
-        hoverinfo='none'
-    )
-    fig.add_trace(colorbar_trace)
 
     fig.update_layout(
         scene=dict(
@@ -138,6 +137,12 @@ def patch_plot(mesh, manifold_df, cluster_ids, var, scan_name, color_scale='Plas
         width=1000,
         paper_bgcolor='white'
     )
-    #fig.write_image('patch_fig.png', format='png', scale=2, engine='kaleido')
+    fig.update_traces(
+        cmin=cmin,
+        cmax=cmax,
+        selector=dict(type='mesh3d')
+    )
+    
+    fig.write_html(os.getcwd() + os.sep  + f"{scan_name}.html")
     fig.show()
-    return manifold_df
+    return manifold_df, fig

@@ -231,7 +231,7 @@ def Manifold(mesh, scan_name, quantities, m, prm):
 
     km = MiniBatchKMeans(n_clusters=k, max_iter=100, batch_size=1536).fit(triangle_COMs)
     mesh_quants, patch_areas, num_elem_patch, avg_elem_area = calculate_quantities(mesh_clean, quantities, k, km.labels_)
-    return organize_data(scan_name, k, km.cluster_centers_, mesh_quants, num_elem_patch, avg_elem_area, patch_areas, quantities), k, mesh_clean
+    return organize_data(scan_name, k, km.cluster_centers_, mesh_quants, num_elem_patch, avg_elem_area, patch_areas, quantities), k, mesh_clean, km.labels_
 
 def ProcessManifold(path, quantities, m, progress_queue, prm):
     """Used to organize the results of Manifold."""
@@ -239,7 +239,7 @@ def ProcessManifold(path, quantities, m, progress_queue, prm):
     full_scan_path = os.path.join(path_name, scan_name)
     mesh = GetMeshFromParquet(full_scan_path)
     scan_name_no_ext = file_name_not_ext(scan_name)
-    manifold_df, patches, mesh_clean = Manifold(mesh, quantities=quantities, m=m, scan_name=scan_name, prm=prm)
+    manifold_df, patches, mesh_clean, _ = Manifold(mesh, quantities=quantities, m=m, scan_name=scan_name, prm=prm)
     A, As, V, k1, k2 = mesh_clean.area, mesh_clean.area_faces, mesh_clean.volume, mesh_clean.curvatures[:,0], mesh_clean.curvatures[:,1]
     vertex_areas = np.zeros(len(mesh_clean.vertices))
     for vertex_idx in range(len(mesh_clean.vertices)):
