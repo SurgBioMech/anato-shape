@@ -233,11 +233,7 @@ def Manifold(mesh, scan_name, quantities, m, prm):
     mesh_quants, patch_areas, num_elem_patch, avg_elem_area = calculate_quantities(mesh_clean, quantities, k, km.labels_)
     return organize_data(scan_name, k, km.cluster_centers_, mesh_quants, num_elem_patch, avg_elem_area, patch_areas, quantities), k, mesh_clean, km.labels_
 
-def ProcessManifold(path, quantities, m, progress_queue, prm):
-    """Used to organize the results of Manifold."""
-    scan_name, path_name = path[1], path[0]
-    full_scan_path = os.path.join(path_name, scan_name)
-    mesh = GetMeshFromParquet(full_scan_path)
+def ProcessManifoldMesh(mesh, quantities, m, prm, scan_name):
     scan_name_no_ext = file_name_not_ext(scan_name)
     manifold_df, patches, mesh_clean, _ = Manifold(mesh, quantities=quantities, m=m, scan_name=scan_name, prm=prm)
     A, As, V, k1, k2 = mesh_clean.area, mesh_clean.area_faces, mesh_clean.volume, mesh_clean.curvatures[:,0], mesh_clean.curvatures[:,1]
@@ -266,20 +262,29 @@ def ProcessManifold(path, quantities, m, progress_queue, prm):
         'EulerNumber': [mesh.euler_number],
         'MomentInertia': [np.linalg.norm(mesh_clean.moment_inertia)],
     }), GetStatFeatures(manifold_df, quantities)], axis=1)
+    return scan_features, manifold_df
+
+def ProcessManifold(path, quantities, m, progress_queue, prm):
+    """Used to organize the results of Manifold."""
+    scan_name, path_name = path[1], path[0]
+    full_scan_path = os.path.join(path_name, scan_name)
+    mesh = GetMeshFromParquet(full_scan_path)
+    scan_features, manifold_df = ProcessManifoldMesh(mesh, quantities, m, prm, scan_name)
     progress_queue.put(m)
     return scan_features, manifold_df
 
-def BatchManifold(paths, quantities, m, progress_queue, progress_counts, progress_bars, prm):
+
+def BatchManifold(paths, quantities, m, progress_queue, progress_counts, progress_bars, prm,ProcessManifoldFunc):
     """Parent funciton to Manifold which handles doing many at once."""
     results = []
     for path in paths:
-        result = ProcessManifold(path, quantities, m, progress_queue, prm)
+        result = ProcessManifoldFunc(path, quantities, m, progress_queue, prm)
         results.append(result)
         progress_counts[m] += 1
         progress_bars[m].update(progress(progress_counts[m], len(paths)))
     return results
 
-def MsetBatchManifold(paths, quantities, m_set, prm):
+def MsetBatchManifold(paths, quantities, m_set, prm, ProcessManifoldFunc):
     """Parellel processing function which allows multiple partitioning schemes to be calculated simultaneously."""
     manifold_group, manifold_dict = {}, {}
     overall_progress = display(progress(0, len(m_set) * len(paths)), display_id=True)
@@ -287,13 +292,14 @@ def MsetBatchManifold(paths, quantities, m_set, prm):
     progress_counts = {m: 0 for m in m_set}
 
     with concurrent.futures.ThreadPoolExecutor() as executor:
-        futures = {executor.submit(BatchManifold, paths, quantities, m, queue.Queue(), progress_counts, progress_bars, prm): m for m in m_set}
+        futures = {executor.submit(BatchManifold, paths, quantities, m, queue.Queue(), progress_counts, progress_bars, prm,ProcessManifoldFunc): m for m in m_set}
 
         total_tasks = len(m_set) * len(paths)
         overall_progress_value = 0
         for future in concurrent.futures.as_completed(futures):
             m = futures[future]
             try:
+                BatchManifold(paths, quantities, m, queue.Queue(), progress_counts, progress_bars, prm,ProcessManifoldFunc) #temp
                 result = future.result()
                 if not result or not isinstance(result, list):
                     print(f"Unexpected result format for m={m}: {result}")
@@ -321,7 +327,7 @@ def GetAnatoMeshResults(parent_folder, filter_strings, file_filter_strings, prm=
     paths = GetFilteredMeshPaths(parent_folder, filter_strings, file_filter_strings, ext=".parquet")
     assert len(paths) > 0, "All available data was filtered out."
     print("Starting GetAortaMeshResults: the top most progress bar is for all calculations and the progress bars below are for parallel processes.")
-    manifold_group, manifold_dict = MsetBatchManifold(paths, quantities, m_set, prm)
+    manifold_group, manifold_dict = MsetBatchManifold(paths, quantities, m_set, prm, ProcessManifold)
     results = [process_m_with_progress(m, manifold_group) for m in m_set]
     results_df = pd.concat(results, ignore_index=True)
     print("Finished.")
