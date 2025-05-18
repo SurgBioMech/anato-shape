@@ -274,52 +274,70 @@ def ProcessManifold(path, quantities, m, progress_queue, prm):
     return scan_features, manifold_df
 
 
-def BatchManifold(paths, quantities, m, progress_queue, progress_counts, progress_bars, prm,ProcessManifoldFunc):
-    """Parent funciton to Manifold which handles doing many at once."""
+def BatchManifold(paths, quantities, m_value, run_key,
+                  progress_queue, progress_counts, progress_bars,
+                  prm, ProcessManifoldFunc):
+    """Run one (m,i) job and update its own progress bar."""
     results = []
     for path in paths:
-        result = ProcessManifoldFunc(path, quantities, m, progress_queue, prm)
+        result = ProcessManifoldFunc(path, quantities, m_value, progress_queue, prm)
         results.append(result)
-        progress_counts[m] += 1
-        progress_bars[m].update(progress(progress_counts[m], len(paths)))
+        progress_counts[run_key] += 1
+        progress_bars[run_key].update(
+            progress(progress_counts[run_key], len(paths))
+        )
     return results
 
+
 def MsetBatchManifold(paths, quantities, m_set, prm, ProcessManifoldFunc):
-    """Parellel processing function which allows multiple partitioning schemes to be calculated simultaneously."""
     manifold_group, manifold_dict = {}, {}
     overall_progress = display(progress(0, len(m_set) * len(paths)), display_id=True)
-    progress_bars = {m: display(progress(0, len(paths)), display_id=True) for m in m_set}
-    progress_counts = {m: 0 for m in m_set}
+
+    run_descs = [(m, i) for i, m in enumerate(m_set)]
+    progress_bars  = {rk: display(progress(0, len(paths)), display_id=True) for rk in run_descs}
+    progress_counts = {rk: 0 for rk in run_descs}
 
     with concurrent.futures.ThreadPoolExecutor() as executor:
-        futures = {executor.submit(BatchManifold, paths, quantities, m, queue.Queue(), progress_counts, progress_bars, prm,ProcessManifoldFunc): m for m in m_set}
+        futures = {
+            executor.submit(
+                BatchManifold, paths, quantities, m, (m, i),
+                queue.Queue(), progress_counts, progress_bars, prm,
+                ProcessManifoldFunc
+            ): (m, i)
+            for m, i in run_descs
+        }
 
         total_tasks = len(m_set) * len(paths)
         overall_progress_value = 0
         for future in concurrent.futures.as_completed(futures):
-            m = futures[future]
+            run_key = futures[future]      # (m, i)
+            m, i    = run_key
             try:
-                BatchManifold(paths, quantities, m, queue.Queue(), progress_counts, progress_bars, prm,ProcessManifoldFunc) #temp
                 result = future.result()
                 if not result or not isinstance(result, list):
-                    print(f"Unexpected result format for m={m}: {result}")
+                    print(f"Unexpected result format for run {run_key}: {result}")
                     continue
 
-                manifold_group[m] = [r[0] for r in result]
-                manifold_dict[m] = {file_name_not_ext(path[1]): r[1] for path, r in zip(paths, result)}
+                manifold_group[run_key] = [r[0] for r in result]
+                manifold_dict[run_key]  = {
+                    file_name_not_ext(path[1]): r[1]
+                    for path, r in zip(paths, result)
+                }
                 overall_progress_value += len(paths)
                 overall_progress.update(progress(overall_progress_value, total_tasks))
             except Exception as e:
-                print(f"Error processing m={m}: {e} (paths={paths}, quantities={quantities})")
+                print(f"Error in run {run_key}: {e}")
                 continue
 
     return manifold_group, manifold_dict
 
-def process_m_with_progress(m, manifold_group):
-    """Progress tracking with multiple m_set values."""
-    data = pd.concat(manifold_group[m], ignore_index=True)
-    data['Partition_Prefactor'] = str(m)
+
+def process_m_with_progress(run_key, manifold_group):
+    m, i = run_key
+    data = pd.concat(manifold_group[run_key], ignore_index=True)   
+    data["Replicate"]           = i      
     return data
+
 
 def GetAnatoMeshResults(parent_folder, filter_strings, file_filter_strings, prm=None, quantities=['Gaussian'], m_set=[1.0]):
     """Top most function."""
@@ -328,7 +346,7 @@ def GetAnatoMeshResults(parent_folder, filter_strings, file_filter_strings, prm=
     assert len(paths) > 0, "All available data was filtered out."
     print("Starting GetAortaMeshResults: the top most progress bar is for all calculations and the progress bars below are for parallel processes.")
     manifold_group, manifold_dict = MsetBatchManifold(paths, quantities, m_set, prm, ProcessManifold)
-    results = [process_m_with_progress(m, manifold_group) for m in m_set]
+    results = [process_m_with_progress(rk, manifold_group) for rk in manifold_group]
     results_df = pd.concat(results, ignore_index=True)
     print("Finished.")
     return results_df, manifold_dict
