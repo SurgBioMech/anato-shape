@@ -264,23 +264,22 @@ def ProcessManifoldMesh(mesh, quantities, m, prm, scan_name):
     }), GetStatFeatures(manifold_df, quantities)], axis=1)
     return scan_features, manifold_df
 
-def ProcessManifold(path, quantities, m, progress_queue, prm):
+def ProcessManifold(path, quantities, m, prm):
     """Used to organize the results of Manifold."""
     scan_name, path_name = path[1], path[0]
     full_scan_path = os.path.join(path_name, scan_name)
     mesh = GetMeshFromParquet(full_scan_path)
     scan_features, manifold_df = ProcessManifoldMesh(mesh, quantities, m, prm, scan_name)
-    progress_queue.put(m)
     return scan_features, manifold_df
 
 
 def BatchManifold(paths, quantities, m_value, run_key,
-                  progress_queue, progress_counts, progress_bars,
+                  progress_counts, progress_bars,
                   prm, ProcessManifoldFunc):
     """Run one (m,i) job and update its own progress bar."""
     results = []
     for path in paths:
-        result = ProcessManifoldFunc(path, quantities, m_value, progress_queue, prm)
+        result = ProcessManifoldFunc(path, quantities, m_value, prm)
         results.append(result)
         progress_counts[run_key] += 1
         progress_bars[run_key].update(
@@ -301,7 +300,7 @@ def MsetBatchManifold(paths, quantities, m_set, prm, ProcessManifoldFunc):
         futures = {
             executor.submit(
                 BatchManifold, paths, quantities, m, (m, i),
-                queue.Queue(), progress_counts, progress_bars, prm,
+                progress_counts, progress_bars, prm,
                 ProcessManifoldFunc
             ): (m, i)
             for m, i in run_descs
@@ -335,7 +334,8 @@ def MsetBatchManifold(paths, quantities, m_set, prm, ProcessManifoldFunc):
 def process_m_with_progress(run_key, manifold_group):
     m, i = run_key
     data = pd.concat(manifold_group[run_key], ignore_index=True)   
-    data["Replicate"]           = i      
+    data["m"] = m
+    data["rep"]           = i      
     return data
 
 

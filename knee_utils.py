@@ -104,7 +104,7 @@ def get_trochlea_roi(mesh, height_ratio, anterior_crop):
 
     return roi_mesh
 
-def ProcessKneeManifold(path, quantities, m, progress_queue, prm, trochlea_height_ratio, anterior_crop):
+def ProcessKneeManifold(path, quantities, m, prm, trochlea_height_ratio, anterior_crop):
     """Used to organize the results of Manifold."""
     scan_name, path_name = path[1], path[0]
     full_scan_path = os.path.join(path_name, scan_name)
@@ -116,10 +116,9 @@ def ProcessKneeManifold(path, quantities, m, progress_queue, prm, trochlea_heigh
         mesh = get_trochlea_roi(mesh, trochlea_height_ratio, anterior_crop)  
     
     scan_features, manifold_df = ProcessManifoldMesh(mesh, quantities, m, prm, scan_name)
-    progress_queue.put(m)
     return scan_features, manifold_df
 
-def GetKneeMeshResults(parent_folder, filter_strings, file_filter_strings, prm=None, quantities=['Gaussian'], m_set=[1.0], trochlea_height_ratio=None,anterior_crop=False):
+def GetKneeMeshResults(parent_folder, filter_strings, file_filter_strings, prm=None, quantities=['Gaussian'], m_set=[1.0], trochlea_height_ratio,anterior_crop):
     """Top most function."""
     print("Organizing paths and file names:")
     paths = GetFilteredMeshPaths(parent_folder, filter_strings, file_filter_strings, ext=".parquet")
@@ -135,7 +134,7 @@ def GetKneeMeshResults(parent_folder, filter_strings, file_filter_strings, prm=N
         ProcessManifoldFunc=process_func           
     )
 
-    results = [process_m_with_progress(m, manifold_group) for m in m_set]
+    results = [process_m_with_progress(rk, manifold_group) for rk in manifold_group]
     results_df = pd.concat(results, ignore_index=True)
     print("Finished.")
     return results_df, manifold_dict
