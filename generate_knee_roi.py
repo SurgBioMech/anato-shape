@@ -1,10 +1,14 @@
-import argparse
+from __future__ import annotations
+
+import trimesh
+from scipy.spatial.transform import Rotation as R
+from trimesh.repair import fix_normals
+
 import os
 import pathlib
 import pandas as pd
 import numpy as np
-from scipy.spatial.transform import Rotation as R
-import trimesh
+
 
 # ---------- utility wrappers you already have -----------------
 from anato_utils import (
@@ -13,97 +17,150 @@ from anato_utils import (
 )
 
 
-def get_trochlea_roi(mesh, height_ratio, anterior_crop):
-    """
-    Get the region of interest (ROI) for the trochlea from a 3D mesh.
-    """
-    V = mesh.vertices - mesh.centroid
+# NOTE: No Guarantee of correction of A/P orientation
+# NOTE: MUST Verify empirically on the dataset
 
-    xy = V[:, :2]
+
+def planar_pca(vertices: np.ndarray) -> tuple[np.ndarray, float]:
+    """
+    Principal‑component analysis in the x‑y plane.
+
+    Returns
+    -------
+    ML_xy : np.ndarray, shape (2,)
+        Unit vector of the medial–lateral (long) axis in the x‑y plane.
+    phi   : float
+        Angle (rad) that rotates ML onto +x.
+    """
+    xy = vertices[:, :2]
     C = np.cov(xy.T)
-    eigvals, eigvecs = np.linalg.eigh(C)
-    long_xy = eigvecs[:, eigvals.argmax()]
-    ap_xy = eigvecs[:, eigvals.argmin()]
-    angle = -np.arctan2(long_xy[1], long_xy[0])  # align to +x
+    eigval, eigvec = np.linalg.eigh(C)
+    ML_xy = eigvec[:, eigval.argmax()]
+    phi = -np.arctan2(ML_xy[1], ML_xy[0])
+    return ML_xy, phi
 
-    # two candidate rotations: to +x (phi) or to –x (phi + π)
-    candidates = [angle, angle + np.pi]
 
-    def normalize(a):
-        """wrap angle to (‑π, π] so we can compare magnitudes cleanly"""
-        return (a + np.pi) % (2 * np.pi) - np.pi
-
-    chosen = None
-    for ang in sorted(candidates, key=lambda a: abs(normalize(a))):
-        Rz = R.from_euler("z", ang).as_matrix()
-        ap_new = Rz @ np.append(ap_xy, 0.0)  # rotate A–P vector
-        if ap_new[1] > 0:  # still pointing anterior?
-            chosen = normalize(ang)  # keep the smaller |angle|
-            break
-
-    if chosen is None:  # extremely rare degeneracy (both posterior)
-        # fall back to the smaller candidate anyway
-        chosen = normalize(candidates[0])
-
-    Rz = R.from_euler("z", chosen).as_matrix()
-    V_rot = (Rz @ V.T).T
-
-    # V_rot = V_rot + mesh.centroid
-    mesh_oriented = mesh.copy()
-    mesh_oriented.vertices = V_rot + mesh.centroid
-
-    x_mid = np.median(V_rot[:, 0])
-
-    # Boolean masks for each half
-    left_mask = V_rot[:, 0] <= x_mid  # ← typically lateral condyle
-    right_mask = ~left_mask  # ← typically medial condyle
-
-    # helper: grab distal 5 % from whichever mask we pass in
-    def distal_five_percent(mask):
-        z_cut = np.percentile(V_rot[mask, 2], 5)  # 5 % lowest z in that half
-        return V_rot[mask & (V_rot[:, 2] <= z_cut)]
-
-    condyle_L = distal_five_percent(left_mask)
-    condyle_R = distal_five_percent(right_mask)
-
-    # Single “cluster” point for each condyle (use mean or min‑z if you prefer)
-    center_L = condyle_L.mean(axis=0)
-    center_R = condyle_R.mean(axis=0)
-
-    # distal tip (min‑z vertex) of each condyle
-    tip_L = condyle_L[np.argmin(condyle_L[:, 2])]
-    tip_R = condyle_R[np.argmin(condyle_R[:, 2])]
-
-    # distal tip of each condyle
-    z_L_tip = condyle_L[:, 2].min()  # most distal on left half
-    z_R_tip = condyle_R[:, 2].min()  # most distal on right half
-
-    height_mm = height_ratio * np.linalg.norm(tip_L - tip_R)
-
-    # "higher" condyle is the one with the larger (less negative) z
-    z_bottom = min(z_L_tip, z_R_tip)
-    z_top = max(z_L_tip, z_R_tip) + height_mm
-
-    y_post = 0
-    if anterior_crop:
-        y_post = np.median(V_rot[:, 1])
-    else:
-        y_post = np.min(V_rot[:, 1])
-
-    # use those two x‑positions as the medial–lateral walls of the ROI
-    roi_min = np.array([min(tip_L[0], tip_R[0]), y_post, z_bottom])
-
-    roi_max = np.array([max(tip_L[0], tip_R[0]), np.max(V_rot[:, 1]), z_top])
-
+def submesh_between(
+    mesh: trimesh.Trimesh,
+    V_rot: np.ndarray,
+    roi_min: np.ndarray,
+    roi_max: np.ndarray,
+) -> trimesh.Trimesh:
+    """
+    Return a sub‑mesh whose vertices lie inside [roi_min, roi_max]
+    in the *rotated* frame given by `V_rot`.
+    """
     inside = np.all((V_rot >= roi_min) & (V_rot <= roi_max), axis=1)
     face_mask = inside[mesh.faces].all(axis=1)
-    faces_kept = mesh.faces[face_mask]
-    preserved_vidx = np.unique(faces_kept)
+    m_roi = mesh.submesh([face_mask], append=True)
 
-    roi_mesh = mesh_oriented.submesh([face_mask], append=True)
-    roi_mesh.curvatures = mesh.curvatures[preserved_vidx]
+    # keep a correct curvature array if present
+    if hasattr(mesh, "curvatures"):
+        kept = np.unique(mesh.faces[face_mask])
+        m_roi.curvatures = mesh.curvatures[kept]
 
-    return roi_mesh
+    return m_roi
+
+
+# --------------------------------------------------------------------------
+#  Distal femur – trochlear ROI
+# --------------------------------------------------------------------------
+
+
+def trochlear_roi(
+    femur: trimesh.Trimesh,
+    height_ratio: float = 1.5,
+    anterior_crop: bool = True,
+) -> trimesh.Trimesh:
+    """
+    Extract the trochlear (patellar) surface of an arbitrarily‑posed femur.
+
+    Parameters
+    ----------
+    femur          : trimesh.Trimesh
+    height_ratio   : float
+        Proximal extent expressed as a multiple of the inter‑condylar distance.
+    anterior_crop  : bool
+        If True keep only the anterior half in y; if False keep full depth.
+
+    Returns
+    -------
+    trimesh.Trimesh (sub‑mesh)
+    """
+    V0 = femur.vertices - femur.centroid
+    _, phi = planar_pca(V0)
+
+    Rz = R.from_euler("z", phi).as_matrix()  # best_angle
+    V = femur.vertices - femur.centroid
+    V_rot = (Rz @ V.T).T
+
+    femur_oriented = femur.copy()
+    femur_oriented.vertices = V_rot + femur.centroid  # back to world coords
+    femur_oriented.curvatures = femur.curvatures  # keep curvatures if present
+
+    # --- find condyles -------------------------------------------------
+    x_mid = np.median(V_rot[:, 0])
+    L_mask = V_rot[:, 0] <= x_mid
+    R_mask = ~L_mask
+
+    def distal_percent(mask, pct=5):
+        z_cut = np.percentile(V_rot[mask, 2], pct)
+        return V_rot[mask & (V_rot[:, 2] <= z_cut)]
+
+    cond_L, cond_R = distal_percent(L_mask), distal_percent(R_mask)
+    tip_L, tip_R = cond_L[np.argmin(cond_L[:, 2])], cond_R[np.argmin(cond_R[:, 2])]
+    z_L_tip, z_R_tip = tip_L[2], tip_R[2]
+
+    intercond = np.linalg.norm(tip_L - tip_R)
+    z_bottom = min(z_L_tip, z_R_tip)
+    z_top = max(z_L_tip, z_R_tip) + height_ratio * intercond
+    y_post_cut = np.median(V_rot[:, 1]) if anterior_crop else np.min(V_rot[:, 1])
+
+    roi_min = np.array([min(tip_L[0], tip_R[0]), y_post_cut, z_bottom])
+    roi_max = np.array([max(tip_L[0], tip_R[0]), np.max(V_rot[:, 1]), z_top])
+
+    return submesh_between(femur_oriented, V_rot, roi_min, roi_max)
+
+
+# --------------------------------------------------------------------------
+#  Proximal tibia ROI (simple anterior cropping)
+# --------------------------------------------------------------------------
+
+
+def tibial_roi(
+    tibia: trimesh.Trimesh,
+    anterior_crop: bool = True,
+) -> trimesh.Trimesh:
+    """
+    Extract the full proximal tibia plateau, optionally keeping only
+    the anterior half in y.
+
+    Parameters
+    ----------
+    tibia          : trimesh.Trimesh
+    anterior_crop  : bool
+        If True keep only the anterior half in y.
+
+    Returns
+    -------
+    trimesh.Trimesh (sub‑mesh)
+    """
+    V0 = tibia.vertices - tibia.centroid
+    _, phi = planar_pca(V0)
+
+    Rz = R.from_euler("z", phi).as_matrix()  # best_angle
+    V = tibia.vertices - tibia.centroid
+    V_rot = (Rz @ V.T).T
+
+    tibia_oriented = tibia.copy()
+    tibia_oriented.vertices = V_rot + tibia.centroid  # back to world coords
+    tibia_oriented.curvatures = tibia.curvatures  # keep curvatures if present
+
+    y_post_cut = np.median(V_rot[:, 1]) if anterior_crop else np.min(V_rot[:, 1])
+    roi_min = np.array([V_rot[:, 0].min(), y_post_cut, V_rot[:, 2].min()])
+    roi_max = np.array([V_rot[:, 0].max(), np.max(V_rot[:, 1]), V_rot[:, 2].max()])
+
+    return submesh_between(tibia_oriented, V_rot, roi_min, roi_max)
 
 
 def process_one_mesh(
@@ -113,7 +170,9 @@ def process_one_mesh(
     mesh = GetMeshFromParquet(input_path)
 
     if "femur" in filename.lower():  # crop only femora
-        mesh = get_trochlea_roi(mesh, height_ratio, anterior_crop)
+        mesh = trochlear_roi(mesh, height_ratio, anterior_crop)
+    elif "tibia" in filename.lower():  # crop only tibiae
+        mesh = tibial_roi(mesh, anterior_crop)
 
     rel_dir = os.path.relpath(input_dir, start=input_root)
     dest_dir = os.path.join(output_root, rel_dir)
@@ -131,9 +190,9 @@ def process_one_mesh(
 
 
 input_root = "Knee_7"
-output_root = "Knee_7_ROI"
+output_root = "Knee_7_ROI_AnteriorCrop"
 height_ratio = 1
-anterior_crop = False
+anterior_crop = True
 
 paths = GetFilteredMeshPaths(input_root, ["CI", "TI"], ["M5"], ext=".parquet")
 
