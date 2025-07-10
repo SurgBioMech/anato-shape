@@ -237,7 +237,7 @@ def ProcessManifold(path, quantities, m, progress_queue, prm):
     """Used to organize the results of Manifold."""
     scan_name, path_name = path[1], path[0]
     full_scan_path = os.path.join(path_name, scan_name)
-    if 'SA' in scan_name:
+    if 'SA' in scan_name: #special handling for pediatric scans 
         if ('M5.' not in scan_name) or (m != 1):
             print(f"Skipping {scan_name}: SA scan without M5. or m != 1 (m={m})")
             progress_queue.put(m)
