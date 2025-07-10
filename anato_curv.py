@@ -14,6 +14,9 @@ import numpy as np
 from scipy.spatial import cKDTree
 import scipy.io
 from IPython.display import HTML, display
+from scipy.io import savemat
+
+
 
 def RotateCoordinateSystem(up, vp, nf):
     npp = np.cross(up, vp) / np.linalg.norm(np.cross(up, vp))
@@ -311,3 +314,38 @@ def anato_curv_group_old_woRemoval(parent_path, group_str, file_str, ext_str):
         t += 1
         out.update(progress(t, total_files))
         print(f'''Saved {paths[i][1][:-4] + ext_str}.parquet to {paths[i][0]}''')
+
+def convert_stl_folder_to_mat(stl_folder, mat_folder):
+    """
+    Convert all .stl meshes in `stl_folder` into .mat files in `mat_folder`,
+    saving variables named:
+      <basename>_surface_vertices    (Nx3 float)
+      <basename>_surface_triangles   (Mx3 int, 1-based)
+
+    Those .mat files can then be re-imported as:
+
+        mat = scipy.io.loadmat(path)
+        svs = mat[<basename>+'_surface_vertices']
+        sts = mat[<basename>+'_surface_triangles'] - 1
+        mesh = trimesh.Trimesh(vertices=svs, faces=sts)
+    """
+    os.makedirs(mat_folder, exist_ok=True)
+
+    for fname in os.listdir(stl_folder):
+        if not fname.lower().endswith('.stl'):
+            continue
+
+        base, _ = os.path.splitext(fname)
+        stl_path = os.path.join(stl_folder, fname)
+        mat_path = os.path.join(mat_folder, base + '.mat')
+
+        # load the triangular mesh
+        mesh = trimesh.load(stl_path, force='mesh')
+        verts = mesh.vertices
+        faces = mesh.faces + 1   # convert to 1‐based indexing
+
+        mdict = {
+            f"{base}_surface_vertices": verts,
+            f"{base}_surface_triangles": faces
+        }
+        savemat(mat_path, mdict)

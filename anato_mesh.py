@@ -231,15 +231,20 @@ def Manifold(mesh, scan_name, quantities, m, prm):
 
     km = MiniBatchKMeans(n_clusters=k, max_iter=100, batch_size=1536).fit(triangle_COMs)
     mesh_quants, patch_areas, num_elem_patch, avg_elem_area = calculate_quantities(mesh_clean, quantities, k, km.labels_)
-    return organize_data(scan_name, k, km.cluster_centers_, mesh_quants, num_elem_patch, avg_elem_area, patch_areas, quantities), k, mesh_clean
+    return organize_data(scan_name, k, km.cluster_centers_, mesh_quants, num_elem_patch, avg_elem_area, patch_areas, quantities), k, mesh_clean, km.labels_
 
 def ProcessManifold(path, quantities, m, progress_queue, prm):
     """Used to organize the results of Manifold."""
     scan_name, path_name = path[1], path[0]
     full_scan_path = os.path.join(path_name, scan_name)
+    if 'SA' in scan_name:
+        if ('M5.' not in scan_name) or (m != 1):
+            print(f"Skipping {scan_name}: SA scan without M5. or m != 1 (m={m})")
+            progress_queue.put(m)
+            return None, None
     mesh = GetMeshFromParquet(full_scan_path)
     scan_name_no_ext = file_name_not_ext(scan_name)
-    manifold_df, patches, mesh_clean = Manifold(mesh, quantities=quantities, m=m, scan_name=scan_name, prm=prm)
+    manifold_df, patches, mesh_clean, cluster_ids = Manifold(mesh, quantities=quantities, m=m, scan_name=scan_name, prm=prm)
     A, As, V, k1, k2 = mesh_clean.area, mesh_clean.area_faces, mesh_clean.volume, mesh_clean.curvatures[:,0], mesh_clean.curvatures[:,1]
     vertex_areas = np.zeros(len(mesh_clean.vertices))
     for vertex_idx in range(len(mesh_clean.vertices)):
@@ -247,7 +252,7 @@ def ProcessManifold(path, quantities, m, progress_queue, prm):
         vertex_areas[vertex_idx] = As[connected_faces].sum() / len(connected_faces)
     As = vertex_areas
     scan_features = pd.concat([pd.DataFrame({
-        'ScanName': [scan_name_no_ext],
+        'Scan_ID': [scan_name_no_ext],
         'AvElemPatch': [np.mean(manifold_df['Num_Elem_per_Patch'])],
         'AvElemArea': [np.mean(manifold_df['Avg_Elem_per_Area'])],
         'AvPatchArea': [np.mean(manifold_df['Patch_Area'])],
@@ -274,9 +279,10 @@ def BatchManifold(paths, quantities, m, progress_queue, progress_counts, progres
     results = []
     for path in paths:
         result = ProcessManifold(path, quantities, m, progress_queue, prm)
-        results.append(result)
         progress_counts[m] += 1
         progress_bars[m].update(progress(progress_counts[m], len(paths)))
+        if result[0] is not None:
+            results.append(result)
     return results
 
 def MsetBatchManifold(paths, quantities, m_set, prm):

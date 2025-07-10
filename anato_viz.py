@@ -71,23 +71,53 @@ def mesh_plot(mesh, mesh_color='lightblue', mesh_opacity=0.7, grid_color='black'
     #fig.write_image('mesh_fig.png', format='png', scale=2, engine='kaleido')
     fig.show()
     
-def patch_plot(mesh, manifold_df, cluster_ids, var, scan_name, color_scale='Plasma', mesh_opacity=0.7, edge_thickness=3):
-    """Interactive 3D mesh plot of the anatomy with colored partitions for surface curvature values and a color bar."""
+def patch_plot(mesh, manifold_df, cluster_ids, var, scan_name, color_scale='Plasma', 
+               mesh_opacity=0.7, edge_thickness=3, min_value=None, max_value=None):
+    """Interactive 3D mesh plot of the anatomy with colored partitions for surface curvature values and a color bar.
+    
+    Parameters:
+    - mesh: trimesh object, 3D triangular mesh of the anatomy.
+    - manifold_df: DataFrame, contains curvature values per cluster.
+    - cluster_ids: list, cluster identifiers corresponding to faces in the mesh.
+    - var: str, column name in manifold_df to visualize.
+    - scan_name: str, scan identifier for the figure title.
+    - color_scale: str, name of the Plotly colorscale.
+    - mesh_opacity: float, opacity of the mesh (0-1).
+    - edge_thickness: int, thickness of the black edges.
+    - min_value: float, optional, minimum value for color scaling.
+    - max_value: float, optional, maximum value for color scaling.
+    
+    Returns:
+    - manifold_df: DataFrame, unmodified input DataFrame.
+    """
+
     v = mesh.vertices
     f = mesh.faces
-    min_value = manifold_df[var].min()
-    max_value = manifold_df[var].max()
     
-    color_map = {cluster_id: plotly.colors.sample_colorscale(color_scale, (value - min_value) / (max_value - min_value))[0]
+    # Use provided min/max values or compute from the data
+    if min_value is None:
+        min_value = manifold_df[var].min()
+    if max_value is None:
+        max_value = manifold_df[var].max()
+    
+    # Normalize color values
+    color_map = {cluster_id: plotly.colors.sample_colorscale(color_scale, 
+                 (value - min_value) / (max_value - min_value))[0]
                  for cluster_id, value in zip(manifold_df.index, manifold_df[var])}
+    
     face_colors = np.array([color_map[cluster_id] for cluster_id in cluster_ids])
     
     fig = go.Figure()
-    mesh_trace = go.Mesh3d(x=v[:, 0], y=v[:, 1], z=v[:, 2],
-                           i=f[:, 0], j=f[:, 1], k=f[:, 2],
-                           facecolor=face_colors, opacity=mesh_opacity, flatshading=True,
+    
+    # Add mesh plot
+    mesh_trace = go.Mesh3d(
+        x=v[:, 0], y=v[:, 1], z=v[:, 2],
+        i=f[:, 0], j=f[:, 1], k=f[:, 2],
+        facecolor=face_colors, opacity=mesh_opacity, flatshading=True
     )
     fig.add_trace(mesh_trace)
+
+    # Draw black edges between clusters
     edge_x, edge_y, edge_z, edge_set = [], [], [], {}
 
     for tri, cluster_id in zip(f, cluster_ids):
@@ -101,11 +131,13 @@ def patch_plot(mesh, manifold_df, cluster_ids, var, scan_name, color_scale='Plas
             else:
                 edge_set[edge] = cluster_id
 
-    edge_trace = go.Scatter3d(x=edge_x, y=edge_y, z=edge_z,
+    edge_trace = go.Scatter3d(
+        x=edge_x, y=edge_y, z=edge_z,
         mode='lines', line=dict(color='black', width=edge_thickness), hoverinfo='none'
     )
     fig.add_trace(edge_trace)
 
+    # Add colorbar
     colorbar_trace = go.Scatter3d(
         x=[None], y=[None], z=[None], 
         mode='markers',
@@ -125,7 +157,9 @@ def patch_plot(mesh, manifold_df, cluster_ids, var, scan_name, color_scale='Plas
     )
     fig.add_trace(colorbar_trace)
 
+    # Update layout
     fig.update_layout(
+        title=f"3D Mesh Plot: {scan_name}",
         scene=dict(
             xaxis=dict(nticks=10, backgroundcolor='white', gridcolor='white'),
             yaxis=dict(nticks=10, backgroundcolor='white', gridcolor='white'),
@@ -138,6 +172,6 @@ def patch_plot(mesh, manifold_df, cluster_ids, var, scan_name, color_scale='Plas
         width=1000,
         paper_bgcolor='white'
     )
-    #fig.write_image('patch_fig.png', format='png', scale=2, engine='kaleido')
+    fig.write_image("high_quality_plot.png", scale=5, width=2000, height=1500)
     fig.show()
     return manifold_df
