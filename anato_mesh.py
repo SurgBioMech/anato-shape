@@ -244,7 +244,7 @@ def ProcessManifold(path, quantities, m, progress_queue, prm):
             return None, None
     mesh = GetMeshFromParquet(full_scan_path)
     scan_name_no_ext = file_name_not_ext(scan_name)
-    manifold_df, patches, mesh_clean = Manifold(mesh, quantities=quantities, m=m, scan_name=scan_name, prm=prm)
+    manifold_df, patches, mesh_clean, _ = Manifold(mesh, quantities=quantities, m=m, scan_name=scan_name, prm=prm)
     A, As, V, k1, k2 = mesh_clean.area, mesh_clean.area_faces, mesh_clean.volume, mesh_clean.curvatures[:,0], mesh_clean.curvatures[:,1]
     vertex_areas = np.zeros(len(mesh_clean.vertices))
     for vertex_idx in range(len(mesh_clean.vertices)):
