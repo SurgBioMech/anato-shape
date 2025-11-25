@@ -294,11 +294,8 @@ def _map_slice_to_2d(
     # Note: Using argmin/argmax on X determines if we cut at Anterior or Posterior
     sourcenode = int(np.argmin(slice_pts_3d[:, 0]))
 
-    # 2. Compute Geodesics (Arc lengths along the surface ring)
-    try:
-        lengths = nx.single_source_dijkstra_path_length(G, sourcenode, weight="weight")
-    except nx.NetworkXNoPath:
-        lengths = {node: 0.0 for node in G.nodes()}
+    # Compute Geodesics (Arc lengths along the surface ring)
+    lengths = nx.single_source_dijkstra_path_length(G, sourcenode, weight="weight")
 
     # 3. Assign Coordinates
     for local_idx, global_idx in enumerate(global_indices):
