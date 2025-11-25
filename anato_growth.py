@@ -21,6 +21,8 @@ from unravel import unravel_elems
 
 import anato_curv as ac
 import anato_mesh as am
+
+
 def plot_registration(source, target, transformation):
     source_temp = copy.deepcopy(source)
     target_temp = copy.deepcopy(target)
@@ -105,7 +107,7 @@ def visualize_segment_registration(iteration, error, X, Y, ax=None, division=0):
             )
         )
         figw.update_layout(
-            title=f"Division {division+1}/{mdiv} — Iter {iteration}",
+            title=f"Division {division+1} — Iter {iteration}",
             scene=dict(xaxis_title="X", yaxis_title="Y", zaxis_title="Z"),
             width=800,
             height=600,
@@ -122,7 +124,7 @@ def visualize_segment_registration(iteration, error, X, Y, ax=None, division=0):
             figw.data[1].x = Y[:, 0]
             figw.data[1].y = Y[:, 1]
             figw.data[1].z = Y[:, 2]
-            figw.layout.title = f"Division {division+1}/{mdiv} — Iter {iteration}"
+            figw.layout.title = f"Division {division+1} — Iter {iteration}"
 
     return figw
 
