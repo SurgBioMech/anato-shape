@@ -7,7 +7,6 @@ from typing import Any, Dict, List, Optional, Tuple
 import matplotlib.pyplot as plt
 import multiprocessing as mp
 import numpy as np
-import numpy as _np
 import open3d as o3d
 import pandas as pd
 import plotly.graph_objects as go
