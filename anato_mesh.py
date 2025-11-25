@@ -357,7 +357,7 @@ def process_m_with_progress(m, manifold_group):
     data['Partition_Prefactor'] = str(m)
     return data
 
-def GetAnatoMeshResults(parent_folder, filter_strings, file_filter_strings, prm=None, quantities=['Gaussian'], m_set=[1.0],parallel=True):
+def GetAnatoMeshResults(parent_folder, filter_strings, file_filter_strings, prm=None, quantities=['Gaussian'], m_set=[1.0], parallel=True):
     """Top most function."""
     print("Organizing paths and file names:")
     paths = GetFilteredMeshPaths(parent_folder, filter_strings, file_filter_strings, ext=".parquet")
