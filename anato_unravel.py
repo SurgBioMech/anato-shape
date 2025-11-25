@@ -158,7 +158,6 @@ def _compute_transport_rotations(tangents, initial_rotation=None):
 def compute_initial_rotation(vertices, start_tangent):
     """
     Computes R0 aligning local X to the first principal component.
-    Correctly forces X to point towards the 'inner' curve (Lesser Curvature).
     """
     pca = PCA(n_components=1)
     # Fit on XY projection as requested
@@ -203,13 +202,13 @@ def unravel(
     # Build straightened centerline
     straightened_line = np.zeros((k, 3), dtype=float)
     min_z_idx = int(np.argmin(cline[:, 2]))
-    flipy = min_z_idx == k - 1
+    flipz = min_z_idx == k - 1
 
     for i in range(1, k):
         dist = np.linalg.norm(cline[i] - cline[i - 1])
         straightened_line[i] = straightened_line[i - 1] + np.array([0.0, 0.0, dist])
 
-    # Compute rotations (X-axis = Lesser Curvature)
+    # Compute rotations
     R0 = compute_initial_rotation(vertices, cline_deriv1[0])
     rotation_matrices = _compute_transport_rotations(cline_deriv1, R0)
 
@@ -221,7 +220,6 @@ def unravel(
     # Prepare for Unraveling
     twod_vertices = np.full((n, 2), np.nan, dtype=float)
     translated = straightened_vertices.copy()
-    # Note: We do NOT shift Y here for the calculation logic, only for slicing range
 
     zmin = np.nanmin(translated[:, 2]) - 1e-6
     zmax = np.nanmax(translated[:, 2]) + 1e-6
@@ -293,12 +291,9 @@ def unravel(
                         found = int(np.argmin(pairwise[lone]))
                     G.add_edge(lone, found, weight=float(pairwise[lone, found]))
 
-        # --- CRITICAL FIX: Source Selection ---
-        # Select the node with the maximum X value.
-        # Since X aligns with Lesser Curvature (pointing IN), max X is the center of the lesser curvature wall.
-        sourcenode = int(np.argmax(vs[:, 0]))
+        sourcenode = int(np.argmin(vs[:, 0]))
 
-        # Calculate geodesic distances from the Lesser Curvature
+        # Calculate geodesic distances
         try:
             lengths = nx.single_source_dijkstra_path_length(
                 G, sourcenode, weight="weight"
@@ -311,12 +306,6 @@ def unravel(
             z_val = translated[global_idx, 2]
             length = lengths.get(local_j, 0.0)
 
-            # --- CRITICAL FIX: Sign Assignment ---
-            # Determine "Left" vs "Right" of the cut based on the Y coordinate
-            # (Binormal direction) in the straightened frame.
-            # Y > 0 is one side, Y < 0 is the other.
-
-            # Using straightened_vertices directly to avoid any shift confusion
             y_val = straightened_vertices[global_idx, 1]
 
             if y_val < 0:
@@ -325,7 +314,7 @@ def unravel(
                 twod_vertices[global_idx, :] = np.array([length, z_val])
 
     # Post-processing flip
-    if flipy:
+    if flipz:
         mz = np.nanmean(twod_vertices[:, 1])
         twod_vertices[:, 1] = (twod_vertices[:, 1] - mz) * -1.0 + mz
         mvalue = np.nanmin(twod_vertices[:, 1])
