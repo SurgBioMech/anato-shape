@@ -594,7 +594,7 @@ def unravel_elems(mesh, cline, cline1stderiv, m, n, plot_figures=False):
     y_bins = np.digitize(twodvertices[:, 1], ydivs) - 1
     y_bins = np.clip(y_bins, 0, m_eff - 1)
 
-    # 5. Group Indices
+    # Group Indices
     # Initialize empty grid
     grps = [[[] for _ in range(n_eff)] for _ in range(m_eff)]
 
