@@ -262,8 +262,8 @@ def segment_registration(
 def growth_mapping(
     initial_mesh: trimesh.Trimesh,
     final_mesh: trimesh.Trimesh,
-    manifold_curvatures: pd.DataFrame,
     ncluster: int,
+    manifold_curvatures: pd.DataFrame,
     curv_m: int = 1,
     plot_figures: bool = False,
     parallel: bool = False,
@@ -292,6 +292,24 @@ def growth_mapping(
         4. Calculate area change per cluster.
         5. Calculate growth rate per cluster.
 
+    Parameters:
+        initial_mesh (trimesh.Trimesh): The initial mesh.
+        final_mesh (trimesh.Trimesh): The final mesh.
+        ncluster (int): Number of clusters for k-means.
+        manifold_curvatures (pd.DataFrame): DataFrame from GetAnatoMeshResults containing manifold curvature data for both meshes.
+        curv_m (int): m value to use for manifold_curvatures
+        plot_figures (bool): Whether to plot figures during processing.
+        parallel (bool): Whether to use parallel processing for segment registration.
+
+        For unraveling:
+            unravel (bool): Whether to perform unraveling and segment-wise registration.
+            mdiv (int): Number of divisions for unraveling.
+            alpha (float): Alpha parameter for deformable registration.
+            beta (float): Beta parameter for deformable registration.
+            cline_initial_pos (np.ndarray): Centerline positions for initial mesh.
+            cline_initial_div (np.ndarray): Centerline derivatives for initial mesh.
+            cline_final_pos (np.ndarray): Centerline positions for final mesh.
+            cline_final_div (np.ndarray): Centerline derivatives for final mesh.
     Returns:
         area_changes (np.ndarray): Array of area changes per cluster.
         intgaussian_changes (np.ndarray): Array of integrated Gaussian curvature changes per cluster.
@@ -359,14 +377,32 @@ def growth_mapping(
         final_mesh.triangles_center
     )
 
+    # Extract integrated Gaussian curvature data
+    initial_manifold_data = {}
+    final_manifold_data = {}
+
+    for m, name in manifold_curvatures.keys():
+        if name == initial_name:
+            initial_manifold_data[m] = {
+                "patch_data": manifold_curvatures[(m, name)][0],
+                "patch_labels": manifold_curvatures[(m, name)][1],
+            }
+        elif name == final_name:
+            final_manifold_data[m] = {
+                "patch_data": manifold_curvatures[(m, name)][0],
+                "patch_labels": manifold_curvatures[(m, name)][1],
+            }
+        else:
+            raise ValueError(f"Unknown manifold name: {name}")
+
     initial_mesh.intgaussian_faces = (
-        initial_manifold_data[m]["patch_data"]
-        .loc[initial_manifold_data[m]["patch_labels"], "IntGaussian"]
+        initial_manifold_data[curv_m]["patch_data"]
+        .loc[initial_manifold_data[curv_m]["patch_labels"], "IntGaussian"]
         .values
     )
     final_mesh.intgaussian_faces = (
-        final_manifold_data[m]["patch_data"]
-        .loc[final_manifold_data[m]["patch_labels"], "IntGaussian"]
+        final_manifold_data[curv_m]["patch_data"]
+        .loc[final_manifold_data[curv_m]["patch_labels"], "IntGaussian"]
         .values
     )
 
