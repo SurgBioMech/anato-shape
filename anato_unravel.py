@@ -6,6 +6,10 @@ from scipy.spatial import ConvexHull
 from scipy.spatial.distance import pdist, squareform
 from sklearn.decomposition import PCA
 
+ANGLE_THRESHOLD_RATIO = (
+    0.85  # Ratio of max angle to consider for candidate cline points
+)
+
 
 def _safe_normalize(v, axis=-1, eps=1e-12):
     norm = np.linalg.norm(v, axis=axis, keepdims=True)
@@ -184,7 +188,7 @@ def _straighten_vertices(
 
         narrowed_angles = theta_deg[centerline_look]
         max_angle = np.max(narrowed_angles)
-        mask = narrowed_angles > 0.85 * max_angle
+        mask = narrowed_angles > ANGLE_THRESHOLD_RATIO * max_angle
         candidate_indices = centerline_look[mask]
 
         if len(candidate_indices) == 0:
