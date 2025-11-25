@@ -3,7 +3,6 @@ import os
 from functools import partial
 from typing import Optional
 
-import matplotlib.pyplot as plt
 import multiprocessing as mp
 import numpy as np
 import open3d as o3d
