@@ -1,7 +1,7 @@
 import copy
 import os
 from functools import partial
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Optional
 
 import matplotlib.pyplot as plt
 import multiprocessing as mp
@@ -9,8 +9,6 @@ import numpy as np
 import open3d as o3d
 import pandas as pd
 import plotly.graph_objects as go
-import scipy.io as sio
-import time as _time
 import trimesh
 from IPython.display import display
 from pycpd import DeformableRegistration
@@ -18,8 +16,6 @@ from sklearn.cluster import KMeans
 
 from unravel import unravel_elems
 
-import anato_curv as ac
-import anato_mesh as am
 
 
 def plot_registration(source, target, transformation):

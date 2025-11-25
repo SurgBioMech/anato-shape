@@ -212,7 +212,7 @@ def unravel(
         comps = list(nx.connected_components(G))
         if len(comps) > 1:
             # find largest component
-            comps_sorted = sorted(comps, key=lambda c: len(c), reverse=True)
+            comps_sorted = sorted(comps, key=len, reverse=True)
             main_comp = comps_sorted[0]
             main_nodes = set(main_comp)
             for comp in comps_sorted[1:]:

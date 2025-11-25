@@ -275,7 +275,7 @@ def ProcessManifold(path, quantities, m, progress_queue, prm):
     return scan_features, manifold_df, cluster_ids
 
 def BatchManifold(paths, quantities, m, progress_queue, progress_counts, progress_bars, prm):
-    """Parent funciton to Manifold which handles doing many at once."""
+    """Parent function to Manifold which handles doing many at once."""
     results = []
     for path in paths:
         scan_features, manifold_df, cluster_ids = ProcessManifold(path, quantities, m, progress_queue, prm)
@@ -340,10 +340,6 @@ def MsetBatchManifold(paths, quantities, m_set, prm, parallel):
                     manifold_dict[(m, file_names[i])] = result[i][1:]
 
                 overall_progress_value += len(paths)
-                overall_progress.update(progress(overall_progress_value, total_tasks))
-            except Exception as e:
-                print(f"Error processing m={m}: {e} (paths={paths}, quantities={quantities})")
-                continue
                 overall_progress.update(progress(overall_progress_value, total_tasks))
             except Exception as e:
                 print(f"Error processing m={m}: {e} (paths={paths}, quantities={quantities})")
