@@ -244,7 +244,7 @@ def ProcessManifold(path, quantities, m, progress_queue, prm):
             return None, None
     mesh = GetMeshFromParquet(full_scan_path)
     scan_name_no_ext = file_name_not_ext(scan_name)
-    manifold_df, patches, mesh_clean, _ = Manifold(mesh, quantities=quantities, m=m, scan_name=scan_name, prm=prm)
+    manifold_df, patches, mesh_clean, cluster_ids = Manifold(mesh, quantities=quantities, m=m, scan_name=scan_name, prm=prm)
     A, As, V, k1, k2 = mesh_clean.area, mesh_clean.area_faces, mesh_clean.volume, mesh_clean.curvatures[:,0], mesh_clean.curvatures[:,1]
     vertex_areas = np.zeros(len(mesh_clean.vertices))
     for vertex_idx in range(len(mesh_clean.vertices)):
@@ -272,41 +272,73 @@ def ProcessManifold(path, quantities, m, progress_queue, prm):
         'MomentInertia': [np.linalg.norm(mesh_clean.moment_inertia)],
     }), GetStatFeatures(manifold_df, quantities)], axis=1)
     progress_queue.put(m)
-    return scan_features, manifold_df
+    return scan_features, manifold_df, cluster_ids
 
 def BatchManifold(paths, quantities, m, progress_queue, progress_counts, progress_bars, prm):
-    """Parent funciton to Manifold which handles doing many at once."""
+    """Parent function to Manifold which handles doing many at once."""
     results = []
     for path in paths:
-        result = ProcessManifold(path, quantities, m, progress_queue, prm)
+        scan_features, manifold_df, cluster_ids = ProcessManifold(path, quantities, m, progress_queue, prm)
         progress_counts[m] += 1
         progress_bars[m].update(progress(progress_counts[m], len(paths)))
-        if result[0] is not None:
-            results.append(result)
+        if scan_features is not None:
+            results.append((scan_features, manifold_df, cluster_ids))
     return results
 
-def MsetBatchManifold(paths, quantities, m_set, prm):
-    """Parellel processing function which allows multiple partitioning schemes to be calculated simultaneously."""
+def MsetBatchManifold(paths, quantities, m_set, prm, parallel):
+    """Processing function which allows multiple partitioning schemes to be calculated simultaneously or sequentially."""
     manifold_group, manifold_dict = {}, {}
-    overall_progress = display(progress(0, len(m_set) * len(paths)), display_id=True)
-    progress_bars = {m: display(progress(0, len(paths)), display_id=True) for m in m_set}
-    progress_counts = {m: 0 for m in m_set}
+    file_names = [file_name_not_ext(path[1]) for path in paths]
+    
+    if parallel:
+        # Parallel processing
+        overall_progress = display(progress(0, len(m_set) * len(paths)), display_id=True)
+        progress_bars = {m: display(progress(0, len(paths)), display_id=True) for m in m_set}
+        progress_counts = {m: 0 for m in m_set}
 
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        futures = {executor.submit(BatchManifold, paths, quantities, m, queue.Queue(), progress_counts, progress_bars, prm): m for m in m_set}
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            futures = {executor.submit(BatchManifold, paths, quantities, m, queue.Queue(), progress_counts, progress_bars, prm): m for m in m_set}
 
+            total_tasks = len(m_set) * len(paths)
+            overall_progress_value = 0
+            for future in concurrent.futures.as_completed(futures):
+                m = futures[future]
+                try:
+                    result = future.result()
+                    if not result or not isinstance(result, list):
+                        print(f"Unexpected result format for m={m}: {result}")
+                        continue
+
+                    manifold_group[m] = [r[0] for r in result]
+                    for i in range(len(result)):
+                        manifold_dict[(m, file_names[i])] = result[i][1:]
+
+                    overall_progress_value += len(paths)
+                    overall_progress.update(progress(overall_progress_value, total_tasks))
+                except Exception as e:
+                    print(f"Error processing m={m}: {e} (paths={paths}, quantities={quantities})")
+                    continue
+    else:
+        # Sequential processing
         total_tasks = len(m_set) * len(paths)
         overall_progress_value = 0
-        for future in concurrent.futures.as_completed(futures):
-            m = futures[future]
+        overall_progress = display(progress(0, total_tasks), display_id=True)
+        
+        for m in m_set:
+            progress_queue = queue.Queue()
+            progress_counts = {m: 0}
+            progress_bars = {m: display(progress(0, len(paths)), display_id=True)}
+            
             try:
-                result = future.result()
+                result = BatchManifold(paths, quantities, m, progress_queue, progress_counts, progress_bars, prm)
                 if not result or not isinstance(result, list):
                     print(f"Unexpected result format for m={m}: {result}")
                     continue
-
+                
                 manifold_group[m] = [r[0] for r in result]
-                manifold_dict[m] = {file_name_not_ext(path[1]): r[1] for path, r in zip(paths, result)}
+                for i in range(len(result)):
+                    manifold_dict[(m, file_names[i])] = result[i][1:]
+
                 overall_progress_value += len(paths)
                 overall_progress.update(progress(overall_progress_value, total_tasks))
             except Exception as e:
@@ -321,13 +353,13 @@ def process_m_with_progress(m, manifold_group):
     data['Partition_Prefactor'] = str(m)
     return data
 
-def GetAnatoMeshResults(parent_folder, filter_strings, file_filter_strings, prm=None, quantities=['Gaussian'], m_set=[1.0]):
+def GetAnatoMeshResults(parent_folder, filter_strings, file_filter_strings, prm=None, quantities=['Gaussian'], m_set=[1.0], parallel=True):
     """Top most function."""
     print("Organizing paths and file names:")
     paths = GetFilteredMeshPaths(parent_folder, filter_strings, file_filter_strings, ext=".parquet")
     assert len(paths) > 0, "All available data was filtered out."
     print("Starting GetAortaMeshResults: the top most progress bar is for all calculations and the progress bars below are for parallel processes.")
-    manifold_group, manifold_dict = MsetBatchManifold(paths, quantities, m_set, prm)
+    manifold_group, manifold_dict = MsetBatchManifold(paths, quantities, m_set, prm, parallel)
     results = [process_m_with_progress(m, manifold_group) for m in m_set]
     results_df = pd.concat(results, ignore_index=True)
     print("Finished.")
