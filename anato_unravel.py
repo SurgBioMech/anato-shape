@@ -340,6 +340,21 @@ def unravel(
     cline: np.ndarray,
     cline_deriv1: np.ndarray,
 ):
+    """
+    Unravels a 3D mesh defined by vertices and vertex normals along a given centerline
+    and its first derivative (tangent).
+    Inputs:
+    - vertices: (n,3) array of vertex coordinates
+    - vertex_normals: (n,3) array of normals per vertex
+    - cline: (k,3) centerline points
+    - cline_deriv1: (k,3) first derivative (tangent) of centerline points
+
+    Outputs:
+        - twod_vertices: (n,2) array of 2D coordinates after unraveling
+        - straightened_line: (k,3) straightened centerline points
+        - straightened_vertices: (n,3) vertices after straightening
+    """
+
     # Validate shapes
     n = vertices.shape[0]
     assert vertices.shape[1] == 3
