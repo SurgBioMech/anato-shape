@@ -52,8 +52,6 @@ def calculate_translation_matrix(pcd_source, pcd_target):
     Returns:
         numpy.ndarray: A 4x4 homogeneous transformation matrix.
     """
-    import numpy as np
-
     # Get the center of coordinates for both point clouds
     center_source = pcd_source.get_center()
     center_target = pcd_target.get_center()
