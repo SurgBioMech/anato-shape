@@ -9,6 +9,9 @@ from sklearn.decomposition import PCA
 ANGLE_THRESHOLD_RATIO = (
     0.85  # Ratio of max angle to consider for candidate cline points
 )
+SEARCH_REGION_FRACTION = (
+    1 / 12
+)  # Fraction of cline length to search around closest point
 
 
 def _safe_normalize(v, axis=-1, eps=1e-12):
@@ -119,18 +122,18 @@ def _compute_initial_rotation(vertices, start_tangent):
         pc1 = -pc1
 
     # Build Basis
-    z_axis = start_tangent / np.linalg.norm(start_tangent)
+    z_axis = _safe_normalize(start_tangent)
 
     # Y is perp to Z and PC1
     y_axis = np.cross(z_axis, pc1)
     if np.linalg.norm(y_axis) < 1e-6:
         y_axis = np.cross(z_axis, np.array([1, 0, 0]))
-    y_axis = y_axis / np.linalg.norm(y_axis)
+    y_axis = _safe_normalize(y_axis)
 
     # X is perp to Y and Z.
     # Since PC1 pointed 'in', and Y is perp to PC1, X will point 'in' (Lesser Curvature)
     x_axis = np.cross(y_axis, z_axis)
-    x_axis = x_axis / np.linalg.norm(x_axis)
+    x_axis = _safe_normalize(x_axis)
 
     return np.stack([x_axis, y_axis, z_axis])
 
@@ -160,7 +163,6 @@ def _straighten_vertices(
 
     # Straighten each vertex by rotating local tangent to [0,0,1] then translating to straightened_line[idx]
     straightened_vertices = np.full((n, 3), np.nan, dtype=float)
-    closest_cline_indices = np.empty(n, dtype=int)
     unit_vertex_normals = _safe_normalize(vertex_normals)
 
     # For each vertex, find closest cline point based on angle with normal and distance
@@ -178,7 +180,7 @@ def _straighten_vertices(
             theta_deg = np.degrees(np.arccos(cos_theta))
 
         idc1 = int(np.argmin(dists))
-        search_region = max(1, int(round(k / 12)))
+        search_region = max(1, int(round(k * SEARCH_REGION_FRACTION)))
         start_pt = max(0, idc1 - search_region)
         end_pt = min(k, idc1 + search_region + 1)
         centerline_look = np.arange(start_pt, end_pt)
@@ -197,8 +199,6 @@ def _straighten_vertices(
         else:
             cand_dists = np.linalg.norm(vertices[i] - cline[candidate_indices], axis=1)
             chosen_local = candidate_indices[int(np.argmin(cand_dists))]
-
-        closest_cline_indices[i] = chosen_local
 
         R = rotation_matrices[chosen_local]
 
@@ -232,7 +232,6 @@ def _build_slice_topology_graph(points_2d):
             d2[neighbors, j] = pairwise[neighbors, j]
 
     # 2. Convex Hull (Close the loop)
-    # -------------------------------
     try:
         hull = ConvexHull(points_2d)
         hull_indices = hull.vertices
@@ -242,10 +241,7 @@ def _build_slice_topology_graph(points_2d):
             d2[a, b] = pairwise[a, b]
             d2[b, a] = pairwise[b, a]
     except Exception:
-        # Fallback for collinear points
-        for m in range(num_pts - 1):
-            d2[m, m + 1] = pairwise[m, m + 1]
-            d2[m + 1, m] = pairwise[m + 1, m]
+        raise RuntimeError("Convex Hull failed; possibly degenerate point set.")
 
     # 3. Create Graph
     # ---------------
@@ -272,8 +268,7 @@ def _build_slice_topology_graph(points_2d):
 
         for comp in comps[1:]:
             for lone_node in comp:
-                # Find nearest node that belongs to the main component
-                # We search via the pre-sorted ascend_idx for efficiency
+                # Find nearest node that belongs to the main component d
                 found = None
                 for candidate in ascend_idx[lone_node]:
                     if candidate in main_nodes:
