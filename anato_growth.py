@@ -63,7 +63,7 @@ def calculate_translation_matrix(pcd_source, pcd_target):
     return transformation_matrix
 
 
-def visualize_segment_registration(iteration, error, X, Y, ax=None, division=0):
+def visualize_segment_registration(iteration, error, X, Y, division=0):
     """
     Plotly-based interactive callback for registration.
 
@@ -165,9 +165,7 @@ def align_segment(args):
     )
 
     callback = (
-        partial(visualize_segment_registration, ax=ax, division=i)
-        if plot_figures
-        else None
+        partial(visualize_segment_registration, division=i) if plot_figures else None
     )
 
     TY, _ = deform_reg.register(callback)
