@@ -44,7 +44,94 @@ def _rotation_from_a_to_b(a, b):
     return R
 
 
-def straighten_vertices(
+def _compute_straightened_centerline(cline):
+    """Calculates cumulative distance along centerline and checks for Z-inversion."""
+    k = cline.shape[0]
+    straightened_line = np.zeros((k, 3), dtype=float)
+
+    # Calculate cumulative distance
+    dists = np.linalg.norm(cline[1:] - cline[:-1], axis=1)
+    cum_dists = np.cumsum(dists)
+    straightened_line[1:, 2] = cum_dists
+
+    # Determine if the original centerline was oriented 'up' or 'down' relative to Z
+    min_z_idx = int(np.argmin(cline[:, 2]))
+    flipz = min_z_idx == k - 1
+
+    return straightened_line, flipz
+
+
+def _compute_transport_rotations(tangents, initial_rotation=None):
+    """
+    Computes rotation matrices along the centerline using Parallel Transport.
+
+    Args:
+        tangents: (k, 3) tangent vectors
+        initial_rotation: (3, 3) optional starting rotation matrix.
+                          If None, defaults to simple Z-alignment.
+    """
+    k = len(tangents)
+    rotations = np.zeros((k, 3, 3))
+
+    # 1. Initialize first frame
+    t0 = tangents[0]
+    t0 = t0 / np.linalg.norm(t0)
+
+    if initial_rotation is not None:
+        rotations[0] = initial_rotation
+    else:
+        z_axis = np.array([0.0, 0.0, 1.0])
+        rotations[0] = _rotation_from_a_to_b(t0, z_axis)
+
+    # 2. Propagate frames minimizing twist (Parallel Transport)
+    for i in range(1, k):
+        t_prev = tangents[i - 1] / np.linalg.norm(tangents[i - 1])
+        t_curr = tangents[i] / np.linalg.norm(tangents[i])
+
+        # Calculate relative rotation from prev tangent to curr tangent
+        R_rel = _rotation_from_a_to_b(t_prev, t_curr)
+
+        # Apply the rotation update
+        # R_curr = R_prev @ R_rel.T
+        rotations[i] = rotations[i - 1] @ R_rel.T
+
+    return rotations
+
+
+def _compute_initial_rotation(vertices, start_tangent):
+    """
+    Computes R0 aligning local X to the first principal component.
+    """
+    pca = PCA(n_components=1)
+    # Fit on XY projection as requested
+    pca.fit(vertices[:, :2])
+    pc1_2d = pca.components_[0]
+    # Reconstruct 3D vector (flat in Z)
+    pc1 = np.array([pc1_2d[0], pc1_2d[1], 0.0])
+
+    # Check orientation: Point PC1 towards centroid
+    to_centroid = np.mean(vertices, axis=0) - vertices[0]
+    if np.dot(pc1, to_centroid) < 0:
+        pc1 = -pc1
+
+    # Build Basis
+    z_axis = start_tangent / np.linalg.norm(start_tangent)
+
+    # Y is perp to Z and PC1
+    y_axis = np.cross(z_axis, pc1)
+    if np.linalg.norm(y_axis) < 1e-6:
+        y_axis = np.cross(z_axis, np.array([1, 0, 0]))
+    y_axis = y_axis / np.linalg.norm(y_axis)
+
+    # X is perp to Y and Z.
+    # Since PC1 pointed 'in', and Y is perp to PC1, X will point 'in' (Lesser Curvature)
+    x_axis = np.cross(y_axis, z_axis)
+    x_axis = x_axis / np.linalg.norm(x_axis)
+
+    return np.stack([x_axis, y_axis, z_axis])
+
+
+def _straighten_vertices(
     vertices: np.ndarray,
     vertex_normals: np.ndarray,
     cline: np.ndarray,
@@ -118,74 +205,137 @@ def straighten_vertices(
     return straightened_vertices
 
 
-def _compute_transport_rotations(tangents, initial_rotation=None):
+def _build_slice_topology_graph(points_2d):
     """
-    Computes rotation matrices along the centerline using Parallel Transport.
-
-    Args:
-        tangents: (k, 3) tangent vectors
-        initial_rotation: (3, 3) optional starting rotation matrix.
-                          If None, defaults to simple Z-alignment.
+    Constructs a connected graph for points in a 2D slice.
+    Uses k-NN + Convex Hull + Component connection to ensure continuity.
     """
-    k = len(tangents)
-    rotations = np.zeros((k, 3, 3))
+    num_pts = points_2d.shape[0]
+    pairwise = squareform(pdist(points_2d))
 
-    # 1. Initialize first frame
-    t0 = tangents[0]
-    t0 = t0 / np.linalg.norm(t0)
+    # 1. k-Nearest Neighbors
+    # ----------------------
+    # Sort neighbors by distance
+    ascend_idx = np.argsort(pairwise, axis=1)
+    last_connect = min(5, num_pts)
 
-    if initial_rotation is not None:
-        rotations[0] = initial_rotation
-    else:
-        z_axis = np.array([0.0, 0.0, 1.0])
-        rotations[0] = _rotation_from_a_to_b(t0, z_axis)
+    # Create adjacency matrix (distance weights)
+    d2 = np.zeros_like(pairwise)
+    for j in range(num_pts):
+        neighbors = ascend_idx[j, 1 : last_connect + 1]  # Skip self (index 0)
+        if neighbors.size > 0:
+            d2[j, neighbors] = pairwise[j, neighbors]
+            d2[neighbors, j] = pairwise[neighbors, j]
 
-    # 2. Propagate frames minimizing twist (Parallel Transport)
-    for i in range(1, k):
-        t_prev = tangents[i - 1] / np.linalg.norm(tangents[i - 1])
-        t_curr = tangents[i] / np.linalg.norm(tangents[i])
+    # 2. Convex Hull (Close the loop)
+    # -------------------------------
+    try:
+        hull = ConvexHull(points_2d)
+        hull_indices = hull.vertices
+        for m in range(len(hull_indices)):
+            a = hull_indices[m]
+            b = hull_indices[(m + 1) % len(hull_indices)]
+            d2[a, b] = pairwise[a, b]
+            d2[b, a] = pairwise[b, a]
+    except Exception:
+        # Fallback for collinear points
+        for m in range(num_pts - 1):
+            d2[m, m + 1] = pairwise[m, m + 1]
+            d2[m + 1, m] = pairwise[m + 1, m]
 
-        # Calculate relative rotation from prev tangent to curr tangent
-        R_rel = _rotation_from_a_to_b(t_prev, t_curr)
+    # 3. Create Graph
+    # ---------------
+    G = nx.Graph()
+    rows, cols = np.where(d2 > 0)
+    # Add edges (weights)
+    # (Iterating zip is faster/cleaner than nested loops for sparse addition)
+    for r, c in zip(rows, cols):
+        if r < c:  # Avoid duplicates
+            G.add_edge(r, c, weight=float(d2[r, c]))
 
-        # Apply the rotation update
-        # R_curr = R_prev @ R_rel.T
-        rotations[i] = rotations[i - 1] @ R_rel.T
+    # Ensure all nodes exist
+    for n in range(num_pts):
+        if n not in G:
+            G.add_node(n)
 
-    return rotations
+    # 4. Connect Disconnected Components
+    # ----------------------------------
+    comps = list(nx.connected_components(G))
+    if len(comps) > 1:
+        comps.sort(key=len, reverse=True)
+        main_comp = comps[0]
+        main_nodes = set(main_comp)
+
+        for comp in comps[1:]:
+            for lone_node in comp:
+                # Find nearest node that belongs to the main component
+                # We search via the pre-sorted ascend_idx for efficiency
+                found = None
+                for candidate in ascend_idx[lone_node]:
+                    if candidate in main_nodes:
+                        found = candidate
+                        break
+
+                # Absolute fallback
+                if found is None:
+                    found = int(np.argmin(pairwise[lone_node]))
+
+                G.add_edge(lone_node, found, weight=float(pairwise[lone_node, found]))
+
+    return G
 
 
-def compute_initial_rotation(vertices, start_tangent):
+def _map_slice_to_2d(
+    G, global_indices, slice_pts_3d, straightened_full_mesh, out_2d_array
+):
     """
-    Computes R0 aligning local X to the first principal component.
+    Performs Dijkstra's algorithm from a source node and assigns 2D (X, Z) coordinates.
     """
-    pca = PCA(n_components=1)
-    # Fit on XY projection as requested
-    pca.fit(vertices[:, :2])
-    pc1_2d = pca.components_[0]
-    # Reconstruct 3D vector (flat in Z)
-    pc1 = np.array([pc1_2d[0], pc1_2d[1], 0.0])
+    # 1. Identify Source Node (The "Cut" line)
+    # Note: Using argmin/argmax on X determines if we cut at Anterior or Posterior
+    sourcenode = int(np.argmin(slice_pts_3d[:, 0]))
 
-    # Check orientation: Point PC1 towards centroid
-    to_centroid = np.mean(vertices, axis=0) - vertices[0]
-    if np.dot(pc1, to_centroid) < 0:
-        pc1 = -pc1
+    # 2. Compute Geodesics (Arc lengths along the surface ring)
+    try:
+        lengths = nx.single_source_dijkstra_path_length(G, sourcenode, weight="weight")
+    except nx.NetworkXNoPath:
+        lengths = {node: 0.0 for node in G.nodes()}
 
-    # Build Basis
-    z_axis = start_tangent / np.linalg.norm(start_tangent)
+    # 3. Assign Coordinates
+    for local_idx, global_idx in enumerate(global_indices):
+        z_val = slice_pts_3d[local_idx, 2]  # Use local Z (same as global)
+        x_len = lengths.get(local_idx, 0.0)
 
-    # Y is perp to Z and PC1
-    y_axis = np.cross(z_axis, pc1)
-    if np.linalg.norm(y_axis) < 1e-6:
-        y_axis = np.cross(z_axis, np.array([1, 0, 0]))
-    y_axis = y_axis / np.linalg.norm(y_axis)
+        # Check sign based on Y-coordinate of the straightened mesh
+        # (Y > 0 is one hemisphere, Y < 0 is the other)
+        y_val = straightened_full_mesh[global_idx, 1]
 
-    # X is perp to Y and Z.
-    # Since PC1 pointed 'in', and Y is perp to PC1, X will point 'in' (Lesser Curvature)
-    x_axis = np.cross(y_axis, z_axis)
-    x_axis = x_axis / np.linalg.norm(x_axis)
+        if y_val < 0:
+            out_2d_array[global_idx, :] = np.array([-x_len, z_val])
+        else:
+            out_2d_array[global_idx, :] = np.array([x_len, z_val])
 
-    return np.stack([x_axis, y_axis, z_axis])
+
+def _apply_post_process_flip(twod_vertices, straightened_line, straightened_vertices):
+    """Flips geometry logic if the centerline was inverted."""
+    # Flip 2D Map Y-axis (which represents Z-height)
+    mz = np.nanmean(twod_vertices[:, 1])
+    twod_vertices[:, 1] = (twod_vertices[:, 1] - mz) * -1.0 + mz
+
+    # Normalize to start at 1.0 (arbitrary shift from original code)
+    mvalue = np.nanmin(twod_vertices[:, 1])
+    shift = 1.0 - mvalue
+    twod_vertices[:, 1] += shift
+
+    # Flip Straightened Line Z
+    mz_line = np.nanmean(straightened_line[:, 2])
+    straightened_line[:, 2] = (straightened_line[:, 2] - mz_line) * -1.0 + mz_line
+    straightened_line[:, 2] += shift
+
+    # Flip Straightened Vertices Z
+    mz_vs = np.nanmean(straightened_vertices[:, 2])
+    straightened_vertices[:, 2] = (straightened_vertices[:, 2] - mz_vs) * -1.0 + mz_vs
+    straightened_vertices[:, 2] += shift
 
 
 def unravel(
@@ -200,136 +350,66 @@ def unravel(
     assert vertices.shape[1] == 3
 
     # Build straightened centerline
-    straightened_line = np.zeros((k, 3), dtype=float)
-    min_z_idx = int(np.argmin(cline[:, 2]))
-    flipz = min_z_idx == k - 1
-
-    for i in range(1, k):
-        dist = np.linalg.norm(cline[i] - cline[i - 1])
-        straightened_line[i] = straightened_line[i - 1] + np.array([0.0, 0.0, dist])
+    straightened_line, flipz = _compute_straightened_centerline(cline)
 
     # Compute rotations
-    R0 = compute_initial_rotation(vertices, cline_deriv1[0])
+    R0 = _compute_initial_rotation(vertices, cline_deriv1[0])
     rotation_matrices = _compute_transport_rotations(cline_deriv1, R0)
 
     # Straighten vertices
-    straightened_vertices = straighten_vertices(
+    straightened_vertices = _straighten_vertices(
         vertices, vertex_normals, cline, rotation_matrices, straightened_line
     )
 
     # Prepare for Unraveling
     twod_vertices = np.full((n, 2), np.nan, dtype=float)
-    translated = straightened_vertices.copy()
 
-    zmin = np.nanmin(translated[:, 2]) - 1e-6
-    zmax = np.nanmax(translated[:, 2]) + 1e-6
+    # Translate vertices locally so we can slice by Z easily
+    # (We use a copy to avoid modifying the specific X/Y placement of straightened_vertices)
+    slicing_ref = straightened_vertices.copy()
+
+    # Define slices
+    zmin = np.nanmin(slicing_ref[:, 2]) - 1e-6
+    zmax = np.nanmax(slicing_ref[:, 2]) + 1e-6
     zs = np.linspace(zmin, zmax, 100)
 
     for zi in range(len(zs) - 1):
-        mask_slice = (translated[:, 2] > zs[zi]) & (translated[:, 2] < zs[zi + 1])
+        # Identify nodes in this Z-slab
+        mask_slice = (slicing_ref[:, 2] > zs[zi]) & (slicing_ref[:, 2] < zs[zi + 1])
         slice_idx = np.nonzero(mask_slice)[0]
+
         if slice_idx.size == 0:
             continue
 
-        vs = translated[slice_idx][:, [0, 1, 2]]
+        # Extract local X, Y, Z for this slice
+        # Note: We use X and Y for topology (graph), Z is just passed through
+        slice_pts_3d = slicing_ref[slice_idx]
 
-        if vs.shape[0] == 1:
-            x_sign = -1 if vs[0, 0] < 0 else 1
-            twod_vertices[slice_idx[0]] = np.array([0.0 * x_sign, vs[0, 2]])
+        # Handle edge case: Single point slice
+        if slice_pts_3d.shape[0] == 1:
+            x_sign = -1 if slice_pts_3d[0, 0] < 0 else 1
+            twod_vertices[slice_idx[0]] = np.array([0.0 * x_sign, slice_pts_3d[0, 2]])
             continue
 
-        # --- Graph Construction (Standard) ---
-        XY = vs[:, :2]
-        pairwise = squareform(pdist(XY))
-        ascend_idx = np.argsort(pairwise, axis=1)
-        last_connect = min(5, pairwise.shape[0])
-        d2 = np.zeros_like(pairwise)
+        # A. Build Topology (Graph) for this slice
+        xy_local = slice_pts_3d[:, :2]
+        G = _build_slice_topology_graph(xy_local)
 
-        for j in range(pairwise.shape[0]):
-            neighbors = ascend_idx[j, 1 : last_connect + 1]
-            if neighbors.size > 0:
-                d2[j, neighbors] = pairwise[j, neighbors]
-                d2[neighbors, j] = pairwise[neighbors, j]
+        # B. Unroll (Map to 2D) using Geodesics
+        _map_slice_to_2d(
+            G,
+            slice_idx,
+            slice_pts_3d,  # Used for finding the source node (X geometry)
+            straightened_vertices,  # Used for sign determination (Y geometry)
+            twod_vertices,  # Output array
+        )
 
-        try:
-            hull = ConvexHull(XY)
-            hull_indices = hull.vertices
-            for m in range(len(hull_indices)):
-                a_idx = hull_indices[m]
-                b_idx = hull_indices[(m + 1) % len(hull_indices)]
-                d2[a_idx, b_idx] = pairwise[a_idx, b_idx]
-                d2[b_idx, a_idx] = pairwise[b_idx, a_idx]
-        except Exception:
-            for m in range(pairwise.shape[0] - 1):
-                d2[m, m + 1] = pairwise[m, m + 1]
-                d2[m + 1, m] = pairwise[m + 1, m]
-
-        G = nx.Graph()
-        for a in range(pairwise.shape[0]):
-            for b in range(a + 1, pairwise.shape[0]):
-                if d2[a, b] > 0:
-                    G.add_edge(a, b, weight=float(d2[a, b]))
-
-        if G.number_of_nodes() == 0:
-            continue
-        for node in range(pairwise.shape[0]):
-            if node not in G:
-                G.add_node(node)
-
-        comps = list(nx.connected_components(G))
-        if len(comps) > 1:
-            comps_sorted = sorted(comps, key=len, reverse=True)
-            main_nodes = set(comps_sorted[0])
-            for comp in comps_sorted[1:]:
-                for lone in comp:
-                    found = None
-                    for candidate in ascend_idx[lone]:
-                        if candidate in main_nodes:
-                            found = candidate
-                            break
-                    if found is None:
-                        found = int(np.argmin(pairwise[lone]))
-                    G.add_edge(lone, found, weight=float(pairwise[lone, found]))
-
-        sourcenode = int(np.argmin(vs[:, 0]))
-
-        # Calculate geodesic distances
-        try:
-            lengths = nx.single_source_dijkstra_path_length(
-                G, sourcenode, weight="weight"
-            )
-        except nx.NetworkXNoPath:
-            # Fallback if graph is somehow broken, though component fix above handles most
-            lengths = {node: 0.0 for node in G.nodes()}
-
-        for local_j, global_idx in enumerate(slice_idx):
-            z_val = translated[global_idx, 2]
-            length = lengths.get(local_j, 0.0)
-
-            y_val = straightened_vertices[global_idx, 1]
-
-            if y_val < 0:
-                twod_vertices[global_idx, :] = np.array([-length, z_val])
-            else:
-                twod_vertices[global_idx, :] = np.array([length, z_val])
-
-    # Post-processing flip
+    # 3. Post-Processing
+    # ------------------
     if flipz:
-        mz = np.nanmean(twod_vertices[:, 1])
-        twod_vertices[:, 1] = (twod_vertices[:, 1] - mz) * -1.0 + mz
-        mvalue = np.nanmin(twod_vertices[:, 1])
-        twod_vertices[:, 1] = twod_vertices[:, 1] - mvalue + 1.0
-
-        mz_line = np.nanmean(straightened_line[:, 2])
-        straightened_line[:, 2] = (straightened_line[:, 2] - mz_line) * -1.0 + mz_line
-        straightened_line[:, 2] = straightened_line[:, 2] - mvalue + 1.0
-
-        mz_vs = np.nanmean(straightened_vertices[:, 2])
-        straightened_vertices[:, 2] = (
-            straightened_vertices[:, 2] - mz_vs
-        ) * -1.0 + mz_vs
-        straightened_vertices[:, 2] = straightened_vertices[:, 2] - mvalue + 1.0
-
+        _apply_post_process_flip(
+            twod_vertices, straightened_line, straightened_vertices
+        )
     return twod_vertices, straightened_line, straightened_vertices
 
 
@@ -510,23 +590,27 @@ def unravel_elems(mesh, cline, cline1stderiv, m, n, plot_figures=False):
         xdivs = n * (xed - xst) + xst
         n_eff = len(n) - 1
 
-    # ---- Allocate groups ----
+    x_bins = np.digitize(twodvertices[:, 0], xdivs) - 1
+    x_bins = np.clip(x_bins, 0, n_eff - 1)
+
+    y_bins = np.digitize(twodvertices[:, 1], ydivs) - 1
+    y_bins = np.clip(y_bins, 0, m_eff - 1)
+
+    # 5. Group Indices
+    # Initialize empty grid
     grps = [[[] for _ in range(n_eff)] for _ in range(m_eff)]
 
-    total_count = 0
+    # Fill grid
+    # We iterate over the faces once
+    for face_idx, (r, c) in enumerate(zip(y_bins, x_bins)):
+        grps[r][c].append(face_idx)
 
-    # ---- Assign faces to bins ----
-    for i in range(m_eff):
-        for j in range(n_eff):
-            mask = (
-                (twodvertices[:, 1] > ydivs[i])
-                & (twodvertices[:, 1] < ydivs[i + 1])
-                & (twodvertices[:, 0] > xdivs[j])
-                & (twodvertices[:, 0] < xdivs[j + 1])
-            )
-            idx = np.where(mask)[0]
-            grps[i][j] = idx
-            total_count += len(idx)
+    # Convert lists to numpy arrays
+    total_count = 0
+    for r in range(m_eff):
+        for c in range(n_eff):
+            grps[r][c] = np.array(grps[r][c])
+            total_count += len(grps[r][c])
 
     # ---- Ensure all faces are assigned ----
     if total_count != mesh.faces.shape[0]:
