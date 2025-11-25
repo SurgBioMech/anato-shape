@@ -4,6 +4,7 @@ import numpy as np
 import plotly.graph_objects as go
 from scipy.spatial import ConvexHull
 from scipy.spatial.distance import pdist, squareform
+from sklearn.decomposition import PCA
 
 
 def _safe_normalize(v, axis=-1, eps=1e-12):
@@ -43,48 +44,28 @@ def _rotation_from_a_to_b(a, b):
     return R
 
 
-def unravel(
+def straighten_vertices(
     vertices: np.ndarray,
     vertex_normals: np.ndarray,
     cline: np.ndarray,
-    cline_deriv1: np.ndarray,
+    rotation_matrices: np.ndarray,
+    straightened_line: np.ndarray,
 ):
     """
-    Unravel a 3D mesh surface around a centerline into a 2D representation.
-    The unraveling is done by straightening the centerline along the z-axis and then
-    flattening the surface in z-slices based on geodesic distances around the centerline
+    Straighten the mesh vertices according to the centerline and its first derivative.
+    The straightening aligns the centerline along the z-axis and rotates the mesh accordingly.
 
     Inputs:
-      - vertices: (n,3) array of vertex coordinates
-      - vertex_normals: (n,3) array of normals per vertex
-      - cline: (k,3) centerline points
-      - cline_deriv1: (k,3) first derivatives (tangent vectors) of cline
+    - vertices: (n,3) array of vertex coordinates
+    - vertex_normals: (n,3) array of normals per vertex
+    - cline: (k,3) centerline points
+    - rotation_matrices: (k,3,3) rotation matrices along the centerline
+    - straightened_line: (k,3) straightened centerline points
     Outputs:
-      - twod_vertices: (n,2) unraveled coordinates [x_along_cut_or_signed_length, z_straightened]
-      - straightened_line: (k,3) straightened centerline (z increases with centerline arc length)
-      - straightened_vertices: (n,3) vertices after straightening (in same 3D coords as straightened_line)
+        - straightened_vertices: (n,3) vertices after straightening
     """
-    # Validate shapes
     n = vertices.shape[0]
     k = cline.shape[0]
-    assert vertices.shape[1] == 3 and cline.shape[1] == 3 and cline_deriv1.shape[1] == 3
-    assert vertex_normals.shape[0] == n and vertex_normals.shape[1] == 3
-
-    # Build straightened centerline: accumulate distances along original cline as z coordinate.
-    straightened_line = np.zeros((k, 3), dtype=float)
-    min_z_idx = int(np.argmin(cline[:, 2]))
-    if min_z_idx == 0:
-        flipy = False
-    elif min_z_idx == k - 1:
-        flipy = True
-    else:
-        raise ValueError(
-            "Unexpected location of min z on centerline; expected end points."
-        )
-
-    for i in range(1, k):
-        dist = np.linalg.norm(cline[i] - cline[i - 1])
-        straightened_line[i] = straightened_line[i - 1] + np.array([0.0, 0.0, dist])
 
     # Straighten each vertex by rotating local tangent to [0,0,1] then translating to straightened_line[idx]
     straightened_vertices = np.full((n, 3), np.nan, dtype=float)
@@ -98,50 +79,149 @@ def unravel(
         vecs = cline - vertices[i]  # shape (k,3)
         dists = np.linalg.norm(vecs, axis=1)
         # avoid divide by zero
+
+        # Smart search for closest point (using normals)
         with np.errstate(invalid="ignore"):
             uv = vecs / np.maximum(dists[:, None], 1e-12)
-        cos_theta = np.clip((uv @ u), -1.0, 1.0)
-        theta_deg = np.degrees(np.arccos(cos_theta))
+            cos_theta = np.clip((uv @ u), -1.0, 1.0)
+            theta_deg = np.degrees(np.arccos(cos_theta))
 
-        # choose a search neighborhood around closest cline point
         idc1 = int(np.argmin(dists))
         search_region = max(1, int(round(k / 12)))
         start_pt = max(0, idc1 - search_region)
         end_pt = min(k, idc1 + search_region + 1)
         centerline_look = np.arange(start_pt, end_pt)
+
         if centerline_look.size == 0:
             centerline_look = np.arange(k)
 
         narrowed_angles = theta_deg[centerline_look]
         max_angle = np.max(narrowed_angles)
-
-        # take points within top 15% of the max angle
         mask = narrowed_angles > 0.85 * max_angle
         candidate_indices = centerline_look[mask]
 
-        # among candidates pick cline point closest in Euclidean distance to vertex
-        cand_dists = np.linalg.norm(vertices[i] - cline[candidate_indices], axis=1)
-        chosen_local = candidate_indices[int(np.argmin(cand_dists))]
+        if len(candidate_indices) == 0:
+            # Fallback if filtering removes all points
+            chosen_local = idc1
+        else:
+            cand_dists = np.linalg.norm(vertices[i] - cline[candidate_indices], axis=1)
+            chosen_local = candidate_indices[int(np.argmin(cand_dists))]
+
         closest_cline_indices[i] = chosen_local
 
-        # compute rotation to align tangent at chosen point to [0,0,1]
-        vec_from = cline_deriv1[chosen_local]
-        if np.linalg.norm(vec_from) < 1e-12:
-            vec_from = np.array([0.0, 0.0, 1.0])
-        else:
-            vec_from = vec_from / np.linalg.norm(vec_from)
-        vec_to = np.array([0.0, 0.0, 1.0])
-        R = _rotation_from_a_to_b(vec_from, vec_to)
+        R = rotation_matrices[chosen_local]
 
         vec = vertices[i] - cline[chosen_local]
         rotated_vec = R.dot(vec)
         straightened_vertices[i] = straightened_line[chosen_local] + rotated_vec
+        # ------------------------------
+    return straightened_vertices
 
-    # Now "unravel" per z-slices.
+
+def _compute_transport_rotations(tangents, initial_rotation=None):
+    """
+    Computes rotation matrices along the centerline using Parallel Transport.
+
+    Args:
+        tangents: (k, 3) tangent vectors
+        initial_rotation: (3, 3) optional starting rotation matrix.
+                          If None, defaults to simple Z-alignment.
+    """
+    k = len(tangents)
+    rotations = np.zeros((k, 3, 3))
+
+    # 1. Initialize first frame
+    t0 = tangents[0]
+    t0 = t0 / np.linalg.norm(t0)
+
+    if initial_rotation is not None:
+        rotations[0] = initial_rotation
+    else:
+        z_axis = np.array([0.0, 0.0, 1.0])
+        rotations[0] = _rotation_from_a_to_b(t0, z_axis)
+
+    # 2. Propagate frames minimizing twist (Parallel Transport)
+    for i in range(1, k):
+        t_prev = tangents[i - 1] / np.linalg.norm(tangents[i - 1])
+        t_curr = tangents[i] / np.linalg.norm(tangents[i])
+
+        # Calculate relative rotation from prev tangent to curr tangent
+        R_rel = _rotation_from_a_to_b(t_prev, t_curr)
+
+        # Apply the rotation update
+        # R_curr = R_prev @ R_rel.T
+        rotations[i] = rotations[i - 1] @ R_rel.T
+
+    return rotations
+
+
+def compute_initial_rotation(vertices, start_tangent):
+    """
+    Computes R0 aligning local X to the first principal component.
+    Correctly forces X to point towards the 'inner' curve (Lesser Curvature).
+    """
+    pca = PCA(n_components=1)
+    # Fit on XY projection as requested
+    pca.fit(vertices[:, :2])
+    pc1_2d = pca.components_[0]
+    # Reconstruct 3D vector (flat in Z)
+    pc1 = np.array([pc1_2d[0], pc1_2d[1], 0.0])
+
+    # Check orientation: Point PC1 towards centroid
+    to_centroid = np.mean(vertices, axis=0) - vertices[0]
+    if np.dot(pc1, to_centroid) < 0:
+        pc1 = -pc1
+
+    # Build Basis
+    z_axis = start_tangent / np.linalg.norm(start_tangent)
+
+    # Y is perp to Z and PC1
+    y_axis = np.cross(z_axis, pc1)
+    if np.linalg.norm(y_axis) < 1e-6:
+        y_axis = np.cross(z_axis, np.array([1, 0, 0]))
+    y_axis = y_axis / np.linalg.norm(y_axis)
+
+    # X is perp to Y and Z.
+    # Since PC1 pointed 'in', and Y is perp to PC1, X will point 'in' (Lesser Curvature)
+    x_axis = np.cross(y_axis, z_axis)
+    x_axis = x_axis / np.linalg.norm(x_axis)
+
+    return np.stack([x_axis, y_axis, z_axis])
+
+
+def unravel(
+    vertices: np.ndarray,
+    vertex_normals: np.ndarray,
+    cline: np.ndarray,
+    cline_deriv1: np.ndarray,
+):
+    # Validate shapes
+    n = vertices.shape[0]
+    k = cline.shape[0]
+    assert vertices.shape[1] == 3
+
+    # Build straightened centerline
+    straightened_line = np.zeros((k, 3), dtype=float)
+    min_z_idx = int(np.argmin(cline[:, 2]))
+    flipy = min_z_idx == k - 1
+
+    for i in range(1, k):
+        dist = np.linalg.norm(cline[i] - cline[i - 1])
+        straightened_line[i] = straightened_line[i - 1] + np.array([0.0, 0.0, dist])
+
+    # Compute rotations (X-axis = Lesser Curvature)
+    R0 = compute_initial_rotation(vertices, cline_deriv1[0])
+    rotation_matrices = _compute_transport_rotations(cline_deriv1, R0)
+
+    # Straighten vertices
+    straightened_vertices = straighten_vertices(
+        vertices, vertex_normals, cline, rotation_matrices, straightened_line
+    )
+
+    # Prepare for Unraveling
     twod_vertices = np.full((n, 2), np.nan, dtype=float)
-    # Translate so minimum y is at zero
     translated = straightened_vertices.copy()
-    translated[:, 1] -= np.nanmin(straightened_vertices[:, 1])
+    # Note: We do NOT shift Y here for the calculation logic, only for slicing range
 
     zmin = np.nanmin(translated[:, 2]) - 1e-6
     zmax = np.nanmax(translated[:, 2]) + 1e-6
@@ -152,111 +232,99 @@ def unravel(
         slice_idx = np.nonzero(mask_slice)[0]
         if slice_idx.size == 0:
             continue
-        vs = translated[slice_idx][:, [0, 1, 2]]  # X,Y,Z for nodes in slice
+
+        vs = translated[slice_idx][:, [0, 1, 2]]
 
         if vs.shape[0] == 1:
-            # single point: length 0, x sign determines sign
             x_sign = -1 if vs[0, 0] < 0 else 1
             twod_vertices[slice_idx[0]] = np.array([0.0 * x_sign, vs[0, 2]])
             continue
 
-        # pairwise Euclidean distances of the slice points (2D spatial distance XY)
-        # Use XY distances for neighborhood and boundary calculations
+        # --- Graph Construction (Standard) ---
         XY = vs[:, :2]
         pairwise = squareform(pdist(XY))
-
-        # adjacency: connect each node to its few nearest neighbours
-        ascend_idx = np.argsort(pairwise, axis=1)  # ascending indices per row
-        last_connect = min(5, pairwise.shape[0])  # number of neighbors to connect
+        ascend_idx = np.argsort(pairwise, axis=1)
+        last_connect = min(5, pairwise.shape[0])
         d2 = np.zeros_like(pairwise)
-        for j in range(pairwise.shape[0]):
-            # Always connect at least one neighbor (the nearest, excluding self)
-            neighbors = ascend_idx[j, 1 : last_connect + 1]  # skip self at index 0
 
+        for j in range(pairwise.shape[0]):
+            neighbors = ascend_idx[j, 1 : last_connect + 1]
             if neighbors.size > 0:
                 d2[j, neighbors] = pairwise[j, neighbors]
                 d2[neighbors, j] = pairwise[neighbors, j]
 
-        # ensure a closed curve by connecting hull edges
         try:
             hull = ConvexHull(XY)
             hull_indices = hull.vertices
-            # connect hull edges (note: hull.vertices cycles through hull order)
             for m in range(len(hull_indices)):
                 a_idx = hull_indices[m]
                 b_idx = hull_indices[(m + 1) % len(hull_indices)]
-                # map hull indices (which are into XY) back to indices in slice_idx-order
                 d2[a_idx, b_idx] = pairwise[a_idx, b_idx]
                 d2[b_idx, a_idx] = pairwise[b_idx, a_idx]
         except Exception:
-            # ConvexHull can fail if points are collinear; in that case, connect sequentially
             for m in range(pairwise.shape[0] - 1):
                 d2[m, m + 1] = pairwise[m, m + 1]
                 d2[m + 1, m] = pairwise[m + 1, m]
 
-        # Fix isolated components: build graph and connect smaller components to main
         G = nx.Graph()
         for a in range(pairwise.shape[0]):
             for b in range(a + 1, pairwise.shape[0]):
                 if d2[a, b] > 0:
                     G.add_edge(a, b, weight=float(d2[a, b]))
+
         if G.number_of_nodes() == 0:
             continue
-        # ensure all nodes present
         for node in range(pairwise.shape[0]):
             if node not in G:
                 G.add_node(node)
 
-        # Ensure that every slice’s point cloud forms a single connected graph by attaching lone nodes to the nearest
-        # “real” boundary component
         comps = list(nx.connected_components(G))
         if len(comps) > 1:
-            # find largest component
             comps_sorted = sorted(comps, key=len, reverse=True)
-            main_comp = comps_sorted[0]
-            main_nodes = set(main_comp)
+            main_nodes = set(comps_sorted[0])
             for comp in comps_sorted[1:]:
                 for lone in comp:
-                    # find nearest main node (in ascend_idx ordering)
-                    # ascend_idx indexes into nodes of this slice
                     found = None
                     for candidate in ascend_idx[lone]:
                         if candidate in main_nodes:
                             found = candidate
                             break
                     if found is None:
-                        # fallback to absolute nearest by pairwise
                         found = int(np.argmin(pairwise[lone]))
                     G.add_edge(lone, found, weight=float(pairwise[lone, found]))
 
-        # Ensure graph is connected now
-        if not nx.is_connected(G):
-            raise RuntimeError("Graph is still not connected after fixing components.")
+        # --- CRITICAL FIX: Source Selection ---
+        # Select the node with the maximum X value.
+        # Since X aligns with Lesser Curvature (pointing IN), max X is the center of the lesser curvature wall.
+        sourcenode = int(np.argmax(vs[:, 0]))
 
-        # For each node in slice, compute shortest path distance from the source (point nearest to x=0 line at same z)
+        # Calculate geodesic distances from the Lesser Curvature
+        try:
+            lengths = nx.single_source_dijkstra_path_length(
+                G, sourcenode, weight="weight"
+            )
+        except nx.NetworkXNoPath:
+            # Fallback if graph is somehow broken, though component fix above handles most
+            lengths = {node: 0.0 for node in G.nodes()}
+
         for local_j, global_idx in enumerate(slice_idx):
-            # find the source node index (closest to x=0 at same z)
             z_val = translated[global_idx, 2]
+            length = lengths.get(local_j, 0.0)
 
-            z_target = translated[global_idx, 2]
-            slice_pts = translated[slice_idx]
-            ref_point = np.array([0.0, 0.0, z_target])
-            dists = np.linalg.norm(slice_pts - ref_point, axis=1)
-            sourcenode = int(np.argmin(dists))
-            try:
-                length = nx.shortest_path_length(
-                    G, source=sourcenode, target=local_j, weight="weight"
-                )
-            except nx.NetworkXNoPath:
-                raise RuntimeError(
-                    "No path found in slice graph for shortest path calculation."
-                )
-            if translated[global_idx, 0] < 0:
+            # --- CRITICAL FIX: Sign Assignment ---
+            # Determine "Left" vs "Right" of the cut based on the Y coordinate
+            # (Binormal direction) in the straightened frame.
+            # Y > 0 is one side, Y < 0 is the other.
+
+            # Using straightened_vertices directly to avoid any shift confusion
+            y_val = straightened_vertices[global_idx, 1]
+
+            if y_val < 0:
                 twod_vertices[global_idx, :] = np.array([-length, z_val])
             else:
                 twod_vertices[global_idx, :] = np.array([length, z_val])
 
-    # Post-processing flip if required (mirror about mean z then shift so minimum y becomes 1)
+    # Post-processing flip
     if flipy:
         mz = np.nanmean(twod_vertices[:, 1])
         twod_vertices[:, 1] = (twod_vertices[:, 1] - mz) * -1.0 + mz
