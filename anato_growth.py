@@ -17,7 +17,7 @@ from IPython.display import display
 from pycpd import DeformableRegistration
 from sklearn.cluster import KMeans
 
-from unravel import unravel_elems, plot_unravel_groups
+from unravel import unravel_elems
 
 import anato_curv as ac
 import anato_mesh as am
