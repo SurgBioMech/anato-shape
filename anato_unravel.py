@@ -254,9 +254,9 @@ def _build_slice_topology_graph(points_2d):
             G.add_edge(r, c, weight=float(d2[r, c]))
 
     # Ensure all nodes exist
-    for n in range(num_pts):
-        if n not in G:
-            G.add_node(n)
+    for node in range(num_pts):
+        if node not in G:
+            G.add_node(node)
 
     # 4. Connect Disconnected Components
     # ----------------------------------
