@@ -9,9 +9,6 @@ import plotly.graph_objects as go
 from scipy.spatial import ConvexHull
 from scipy.spatial.distance import pdist, squareform
 
-import anato_utils as au
-
-
 def _safe_normalize(v, axis=-1, eps=1e-12):
     norm = np.linalg.norm(v, axis=axis, keepdims=True)
     return np.divide(v, np.maximum(norm, eps))
