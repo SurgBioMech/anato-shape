@@ -346,7 +346,6 @@ def unravel(
 ):
     # Validate shapes
     n = vertices.shape[0]
-    k = cline.shape[0]
     assert vertices.shape[1] == 3
 
     # Build straightened centerline
