@@ -588,10 +588,10 @@ def unravel_elems(mesh, cline, cline1stderiv, m, n, plot_figures=False):
         xdivs = n * (xed - xst) + xst
         n_eff = len(n) - 1
 
-    x_bins = np.digitize(twodvertices[:, 0], xdivs) - 1
+    x_bins = np.digitize(twodvertices[:, 0], xdivs, right=True) - 1
     x_bins = np.clip(x_bins, 0, n_eff - 1)
 
-    y_bins = np.digitize(twodvertices[:, 1], ydivs) - 1
+    y_bins = np.digitize(twodvertices[:, 1], ydivs, right=True) - 1
     y_bins = np.clip(y_bins, 0, m_eff - 1)
 
     # Group Indices
