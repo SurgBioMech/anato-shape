@@ -1,10 +1,10 @@
-
 import colorsys
 import networkx as nx
 import numpy as np
 import plotly.graph_objects as go
 from scipy.spatial import ConvexHull
 from scipy.spatial.distance import pdist, squareform
+
 
 def _safe_normalize(v, axis=-1, eps=1e-12):
     norm = np.linalg.norm(v, axis=axis, keepdims=True)
@@ -279,16 +279,18 @@ def unravel(
 def plot_unravel_groups(twodvertices, points, cline, grps, mdiv, ndiv, marker_size=3):
     """
     Combined interactive 2D + 3D Plotly visualization of unravel groups.
-    - twodvertices : (N,2)
-    - points       : (N,3)
-    - cline        : (K,3)
+    - twodvertices : (N,2) array-like
+    - points       : (N,3) array-like
+    - cline        : (K,3) array-like
     - grps         : list-of-lists of index arrays [mdiv][ndiv]
+    - mdiv, ndiv   : Integers specifying the grid dimensions of the groups
+    - marker_size  : Size of the scatter points
     """
 
     pts2d = np.asarray(twodvertices)
     pts3d = np.asarray(points)
 
-    # flatten all groups while keeping order
+    # Flatten all groups while keeping order
     groups = []
     for i in range(mdiv):
         for j in range(ndiv):
@@ -300,15 +302,21 @@ def plot_unravel_groups(twodvertices, points, cline, grps, mdiv, ndiv, marker_si
                 continue
             groups.append((i, j, idx))
 
-    # make consistent number of colors
     n_groups = max(len(groups), 1)
 
     fig = go.Figure()
 
-    # --- 2D traces (scene = scene2) ---
+    # Golden angle approximation (approx 137.5 degrees in radians or 0.3819 fraction)
+    # Using this ensures that consecutive groups have widely different hues.
+    golden_ratio_conjugate = 0.618033988749895
+
+    # --- 2D traces (scene = scene2 / xy plane) ---
     for k, (i, j, idx) in enumerate(groups):
-        hue = (k / n_groups) % 1.0
-        r, g, b = colorsys.hsv_to_rgb(hue, 0.65, 0.9)
+        # Calculate hue using golden angle to maximize distinctness
+        hue = (k * golden_ratio_conjugate) % 1.0
+
+        # High saturation and value for visibility
+        r, g, b = colorsys.hsv_to_rgb(hue, 0.85, 0.95)
         color = "#%02x%02x%02x" % (int(255 * r), int(255 * g), int(255 * b))
 
         fig.add_trace(
@@ -316,7 +324,9 @@ def plot_unravel_groups(twodvertices, points, cline, grps, mdiv, ndiv, marker_si
                 x=pts2d[idx, 0],
                 y=pts2d[idx, 1],
                 mode="markers",
-                marker=dict(size=marker_size, color=color),
+                marker=dict(
+                    size=marker_size, color=color, opacity=1.0
+                ),  # Explicit opacity
                 name=f"2D div{i+1}_grp{j+1}",
                 legendgroup=f"group_{k}",
                 showlegend=False,  # avoid double legends
@@ -325,8 +335,9 @@ def plot_unravel_groups(twodvertices, points, cline, grps, mdiv, ndiv, marker_si
 
     # --- 3D traces (scene = scene) ---
     for k, (i, j, idx) in enumerate(groups):
-        hue = (k / n_groups) % 1.0
-        r, g, b = colorsys.hsv_to_rgb(hue, 0.65, 0.9)
+        # Same color calculation for matching groups
+        hue = (k * golden_ratio_conjugate) % 1.0
+        r, g, b = colorsys.hsv_to_rgb(hue, 0.85, 0.95)
         color = "#%02x%02x%02x" % (int(255 * r), int(255 * g), int(255 * b))
 
         fig.add_trace(
@@ -335,24 +346,27 @@ def plot_unravel_groups(twodvertices, points, cline, grps, mdiv, ndiv, marker_si
                 y=pts3d[idx, 1],
                 z=pts3d[idx, 2],
                 mode="markers",
-                marker=dict(size=marker_size, color=color, opacity=0.8),
+                # Opacity set to 1.0 for opaque points
+                marker=dict(size=marker_size, color=color, opacity=1.0),
                 name=f"div{i+1}_grp{j+1}",
                 legendgroup=f"group_{k}",
             )
         )
 
     # --- centerline for 3D ---
-    fig.add_trace(
-        go.Scatter3d(
-            x=cline[:, 0],
-            y=cline[:, 1],
-            z=cline[:, 2],
-            mode="lines",
-            line=dict(color="black", width=4),
-            name="Centerline",
-            legendgroup="centerline",
+    if cline is not None and len(cline) > 0:
+        cline = np.asarray(cline)
+        fig.add_trace(
+            go.Scatter3d(
+                x=cline[:, 0],
+                y=cline[:, 1],
+                z=cline[:, 2],
+                mode="lines",
+                line=dict(color="black", width=4),
+                name="Centerline",
+                legendgroup="centerline",
+            )
         )
-    )
 
     fig.update_layout(
         width=1100,
@@ -462,8 +476,9 @@ def unravel_elems(mesh, cline, cline1stderiv, m, n, plot_figures=False):
         raise RuntimeError("Error dividing into groups: counts do not match.")
 
     if plot_figures:
-        plot_unravel_groups(
+        fig = plot_unravel_groups(
             twodvertices, mesh.triangles_center, cline, grps, m_eff, n_eff
         )
+        fig.show()
 
     return grps

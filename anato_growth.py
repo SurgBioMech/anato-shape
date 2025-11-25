@@ -307,7 +307,7 @@ def growth_mapping(
         final_kms (KMeans): KMeans object for final mesh clustering.
     """
 
-    # Rigid registration
+    print("Performing rigid registration")
     initial_pcd = o3d.geometry.PointCloud()
     final_pcd = o3d.geometry.PointCloud()
     initial_pcd.points = o3d.utility.Vector3dVector(initial_mesh.vertices)
@@ -347,7 +347,8 @@ def growth_mapping(
             n=1,
             plot_figures=plot_figures,
         )
-        # Perform segment-wise non-rigid registration
+
+        print("Performing segment-wise deformable registration")
         aligned_source_triangles_center = segment_registration(
             initial_translated_mesh,
             final_mesh,
