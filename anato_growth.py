@@ -21,9 +21,6 @@ from unravel import unravel_elems, plot_unravel_groups
 
 import anato_curv as ac
 import anato_mesh as am
-import anato_utils as au
-
-
 def plot_registration(source, target, transformation):
     source_temp = copy.deepcopy(source)
     target_temp = copy.deepcopy(target)
