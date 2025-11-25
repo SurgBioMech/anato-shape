@@ -13,8 +13,7 @@ from IPython.display import display
 from pycpd import DeformableRegistration
 from sklearn.cluster import KMeans
 
-from unravel import unravel_elems
-
+from anato_unravel import unravel_elems
 
 
 def plot_registration(source, target, transformation):
@@ -70,8 +69,8 @@ def visualize_segment_registration(iteration, error, X, Y, division=0):
         return
 
     # ensure arrays are numpy arrays
-    X = _np.asarray(X)
-    Y = _np.asarray(Y)
+    X = np.asarray(X)
+    Y = np.asarray(Y)
 
     # attach storage to function so figs persist across calls
     if not hasattr(visualize_segment_registration, "_figs"):
@@ -182,9 +181,9 @@ def segment_registration(
     n_segments,
     alpha,
     beta,
-    max_iterations=30,
-    plot_figures=False,
-    parallel=False,
+    max_iterations,
+    plot_figures,
+    parallel,
 ):
     """
     Perform segment-wise deformable registration between source and target meshes.
@@ -358,7 +357,8 @@ def growth_mapping(
             alpha=1,
             beta=10,
             max_iterations=30,
-            parallel=False,
+            plot_figures=plot_figures,
+            parallel=parallel,
         )
     else:
         aligned_source_triangles_center = initial_translated_mesh.triangles_center
