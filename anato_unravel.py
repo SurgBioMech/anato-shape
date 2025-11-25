@@ -1,4 +1,3 @@
-import os
 
 import colorsys
 import matplotlib.pyplot as plt
