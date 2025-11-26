@@ -328,7 +328,8 @@ def anato_clean_group(parent_path, group_str, file_str, ext_str):
         concatenated_data = pd.concat([vertices, triangles], axis=1)
         concatenated_data.to_parquet(new_file_name, compression="gzip", index=False)
         t += 1
-        out.update(progress(t, total_files))
+        if out is not None:
+            out.update(progress(t, total_files))
         print(f"""Saved {paths[i][1][:-4] + ext_str}.parquet to {paths[i][0]}""")
 
 
@@ -359,14 +360,15 @@ def anato_curv_group_wRemoval(parent_path, group_str, file_str, ext_str):
         concatenated_data = pd.concat([vertices, triangles, curvatures], axis=1)
         concatenated_data.to_parquet(new_file_name, compression="gzip", index=False)
         t += 1
-        out.update(progress(t, total_files))
+        if out is not None:
+            out.update(progress(t, total_files))
         print(f"""Saved {paths[i][1][:-4] + ext_str}.parquet to {paths[i][0]}""")
 
 
 def anato_curv_group_old_woRemoval(parent_path, group_str, file_str, ext_str):
     paths = GetFilteredMeshPaths(parent_path, group_str, file_str)
     total_files = len(paths)
-    out = display(progress(0, total_files - 1), display_id=True)
+    out = display(progress(0, total_files - 1), display_id=True) # does not work with standard terminal
     t = 0
     for i in range(total_files):
         progress(i, total_files)
@@ -396,7 +398,8 @@ def anato_curv_group_old_woRemoval(parent_path, group_str, file_str, ext_str):
         concatenated_data = pd.concat([vertices, triangles, curvatures], axis=1)
         concatenated_data.to_parquet(new_file_name, compression="gzip", index=False)
         t += 1
-        out.update(progress(t, total_files))
+        if out is not None:
+            out.update(progress(t, total_files))
         print(f"""Saved {paths[i][1][:-4] + ext_str}.parquet to {paths[i][0]}""")
 
 
