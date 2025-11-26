@@ -127,3 +127,17 @@ def MergeMetaData(directory, file_name, cohort_list, results, cat_columns):
     results_df = results.merge(meta_data, on="Scan_ID", how="left")
     results_df[cat_columns] = results_df[cat_columns].astype(str)
     return results_df
+
+
+def parse_cline(cline_df):
+    """Parse centerline dataframe into position and derivative arrays.
+
+    Input: cline_df - pandas dataframe with centerline data exported from ScanIP
+    Output: cline_pos - Nx3 array of centerline positions
+            cline_div - Nx3 array of centerline first derivatives
+    """
+    cline_pos = cline_df[["Position x (global)", "Position y", "Position z"]].values
+    cline_div = cline_df[
+        ["First derivative x", "First derivative y", "First derivative z"]
+    ].values
+    return cline_pos, cline_div
