@@ -1,6 +1,7 @@
 import colorsys
 import networkx as nx
 import numpy as np
+import os
 import plotly.graph_objects as go
 from scipy.spatial import ConvexHull
 from scipy.spatial.distance import pdist, squareform
@@ -632,7 +633,7 @@ def unravel_elems(mesh, cline, cline1stderiv, m, n, plot_figures=False, dir_path
         fig = plot_unravel_groups(
             twodvertices, mesh.triangles_center, cline, grps, m_eff, n_eff
         )
-        if dir_path: 
+        if dir_path:
             fig.write_html(os.path.join(dir_path, "unravel_groups.html"))
 
     return grps

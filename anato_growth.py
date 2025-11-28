@@ -25,8 +25,8 @@ def plot_registration(source, target, transformation, save_path=None, show=False
         source: open3d.geometry.PointCloud or any object with .points (iterable of 3D points)
         target: open3d.geometry.PointCloud or any object with .points
         transformation: 4x4 transformation matrix to apply to source
-        save_path: optional path to save the figure. 
-        show: whether to call fig.show() 
+        save_path: optional path to save the figure.
+        show: whether to call fig.show()
 
     Returns:
         fig: plotly.graph_objects.Figure
@@ -38,7 +38,6 @@ def plot_registration(source, target, transformation, save_path=None, show=False
     src_temp.transform(transformation)
     src_pts = np.asarray(src_temp.points)
     tgt_pts = np.asarray(tgt_temp.points)
-
 
     # build Plotly figure
     fig = go.Figure()
@@ -106,69 +105,60 @@ def calculate_translation_matrix(pcd_source, pcd_target):
     return transformation_matrix
 
 
-def visualize_segment_registration(iteration, error, X, Y, division=0):
+def save_segment_registration(
+    iteration, error, X, Y, dir_path=None, max_iterations=None, division=None
+):
     """
-    Plotly-based interactive callback for registration.
-
-    This creates a single FigureWidget per division and updates its traces
-    in-place on each callback invocation so the widget remains movable and
-    interactive in Jupyter.
+    Saves a snapshot of the registration process to disk.
     """
-    if iteration > 2 and iteration % 2 != 0:
+    if iteration % 5 != 0 and iteration != max_iterations - 1:
         return
 
-    # ensure arrays are numpy arrays
+    # Ensure arrays are numpy arrays
     X = np.asarray(X)
     Y = np.asarray(Y)
 
-    # attach storage to function so figs persist across calls
-    if not hasattr(visualize_segment_registration, "_figs"):
-        visualize_segment_registration._figs = {}
+    # 2. Create a standard Figure (not FigureWidget)
+    fig = go.Figure()
 
-    # create a new FigureWidget for this division the first time
-    if division not in visualize_segment_registration._figs:
-        figw = go.FigureWidget()
-        figw.add_trace(
-            go.Scatter3d(
-                x=X[:, 0],
-                y=X[:, 1],
-                z=X[:, 2],
-                mode="markers",
-                marker=dict(size=2, color="red", opacity=0.7),
-                name="Target (final)",
-            )
+    # Add Target (X)
+    fig.add_trace(
+        go.Scatter3d(
+            x=X[:, 0],
+            y=X[:, 1],
+            z=X[:, 2],
+            mode="markers",
+            marker=dict(size=2, color="red", opacity=0.7),
+            name="Target (final)",
         )
-        figw.add_trace(
-            go.Scatter3d(
-                x=Y[:, 0],
-                y=Y[:, 1],
-                z=Y[:, 2],
-                mode="markers",
-                marker=dict(size=2, color="blue", opacity=0.7),
-                name="Source (initial)",
-            )
-        )
-        figw.update_layout(
-            title=f"Division {division+1} — Iter {iteration}",
-            scene=dict(xaxis_title="X", yaxis_title="Y", zaxis_title="Z"),
-            width=800,
-            height=600,
-        )
-        visualize_segment_registration._figs[division] = figw
-        display(figw)
-    else:
-        # update existing FigureWidget in-place for smooth interactivity
-        figw = visualize_segment_registration._figs[division]
-        with figw.batch_update():
-            figw.data[0].x = X[:, 0]
-            figw.data[0].y = X[:, 1]
-            figw.data[0].z = X[:, 2]
-            figw.data[1].x = Y[:, 0]
-            figw.data[1].y = Y[:, 1]
-            figw.data[1].z = Y[:, 2]
-            figw.layout.title = f"Division {division+1} — Iter {iteration}"
+    )
 
-    return figw
+    # Add Source (Y)
+    fig.add_trace(
+        go.Scatter3d(
+            x=Y[:, 0],
+            y=Y[:, 1],
+            z=Y[:, 2],
+            mode="markers",
+            marker=dict(size=2, color="blue", opacity=0.7),
+            name="Source (initial)",
+        )
+    )
+
+    # Update Layout
+    fig.update_layout(
+        title=f"Division {division+1} — Iter {iteration} (Error: {error:.4f})",
+        scene=dict(xaxis_title="X", yaxis_title="Y", zaxis_title="Z"),
+        width=800,
+        height=600,
+        margin=dict(l=0, r=0, b=0, t=40),
+    )
+
+    os.makedirs(os.path.join(dir_path, "segment_alignment_figs"), exist_ok=True)
+    filename = os.path.join(
+        dir_path, "segment_alignment_figs", f"div{division}_iter_{iteration:04d}.html"
+    )
+    fig.write_html(filename)
 
 
 def align_segment(args):
@@ -186,6 +176,7 @@ def align_segment(args):
         beta,
         max_iterations,
         plot_figures,
+        dir_path,
     ) = args
 
     print(f"Aligning segment {i+1}")
@@ -208,7 +199,14 @@ def align_segment(args):
     )
 
     callback = (
-        partial(visualize_segment_registration, division=i) if plot_figures else None
+        partial(
+            save_segment_registration,
+            dir_path=dir_path,
+            max_iterations=max_iterations,
+            division=i,
+        )
+        if plot_figures
+        else None
     )
 
     TY, _ = deform_reg.register(callback)
@@ -232,6 +230,7 @@ def segment_registration(
     beta,
     max_iterations,
     plot_figures,
+    dir_path,
     parallel,
 ):
     """
@@ -247,6 +246,7 @@ def segment_registration(
     - beta: Regularization parameter beta for deformable registration.
     - max_iterations: Maximum number of iterations for registration.
     - plot_figures: Boolean flag to enable/disable plotting of registration progress.
+    - dir_path: Directory path to save figures.
     - parallel: Boolean flag to enable/disable parallel processing.
 
     Returns:
@@ -269,6 +269,7 @@ def segment_registration(
                     beta,
                     max_iterations,
                     plot_figures,
+                    dir_path,
                 )
             )
 
@@ -291,6 +292,7 @@ def segment_registration(
                     beta,
                     max_iterations,
                     plot_figures,
+                    dir_path,
                 )
             )
             trans_source_triangles_center[source_grps[i][0], :] = TY
@@ -301,9 +303,9 @@ def segment_registration(
 def growth_mapping(
     initial_mesh: trimesh.Trimesh,
     final_mesh: trimesh.Trimesh,
+    initial_manifold_data: dict,
+    final_manifold_data: dict,
     ncluster: int,
-    manifold_curvatures: pd.DataFrame,
-    curv_m: int = 1,
     plot_figures: bool = False,
     dir_path: Optional[str] = None,
     parallel: bool = False,
@@ -335,11 +337,12 @@ def growth_mapping(
     Parameters:
         initial_mesh (trimesh.Trimesh): The initial mesh.
         final_mesh (trimesh.Trimesh): The final mesh.
+        initial_manifold_data (dict): Manifold data for the initial mesh.
+        final_manifold_data (dict): Manifold data for the final mesh.
         ncluster (int): Number of clusters for k-means.
-        manifold_curvatures (pd.DataFrame): DataFrame from GetAnatoMeshResults containing manifold curvature data for both meshes.
-        curv_m (int): m value to use for manifold_curvatures
         dir_path (str, optional): Directory path to save intermediate results. If None, no files are saved.
-        plot_figures (bool): Whether to plot figures during processing.
+        plot_figures (bool): Whether to plot figures during processing. If True, set dir_path to true
+        dir_path (str, optional): Directory path to save results and figures (if plotting).
         parallel (bool): Whether to use parallel processing for segment registration.
 
         For unraveling:
@@ -384,7 +387,13 @@ def growth_mapping(
     initial_translated_mesh.apply_transform(icp_result.transformation)
 
     if plot_figures:
-        fig = plot_registration(initial_pcd, final_pcd, icp_result.transformation, save_path=os.path.join(dir_path, "rigid_registration.html") if dir_path else None)
+        assert dir_path is not None, "dir_path must be provided to save figures"
+        fig = plot_registration(
+            initial_pcd,
+            final_pcd,
+            icp_result.transformation,
+            save_path=(os.path.join(dir_path, "rigid_registration.html")),
+        )
 
     if unravel:
         # Perform unraveling
@@ -395,6 +404,7 @@ def growth_mapping(
             m=mdiv,
             n=1,
             plot_figures=plot_figures,
+            dir_path=dir_path,
         )
         final_unraveled_grps = unravel_elems(
             final_mesh,
@@ -403,6 +413,7 @@ def growth_mapping(
             m=mdiv,
             n=1,
             plot_figures=plot_figures,
+            dir_path=dir_path,
         )
 
         print("Performing segment-wise deformable registration")
@@ -416,6 +427,7 @@ def growth_mapping(
             beta=10,
             max_iterations=30,
             plot_figures=plot_figures,
+            dir_path=dir_path,
             parallel=parallel,
         )
     else:
@@ -426,32 +438,14 @@ def growth_mapping(
         final_mesh.triangles_center
     )
 
-    # Extract integrated Gaussian curvature data
-    initial_manifold_data = {}
-    final_manifold_data = {}
-
-    for m, name in manifold_curvatures.keys():
-        if name == initial_name:
-            initial_manifold_data[m] = {
-                "patch_data": manifold_curvatures[(m, name)][0],
-                "patch_labels": manifold_curvatures[(m, name)][1],
-            }
-        elif name == final_name:
-            final_manifold_data[m] = {
-                "patch_data": manifold_curvatures[(m, name)][0],
-                "patch_labels": manifold_curvatures[(m, name)][1],
-            }
-        else:
-            raise ValueError(f"Unknown manifold name: {name}")
-
     initial_mesh.intgaussian_faces = (
-        initial_manifold_data[curv_m]["patch_data"]
-        .loc[initial_manifold_data[curv_m]["patch_labels"], "IntGaussian"]
+        initial_manifold_data["patch_data"]
+        .loc[initial_manifold_data["patch_labels"], "IntGaussian"]
         .values
     )
     final_mesh.intgaussian_faces = (
-        final_manifold_data[curv_m]["patch_data"]
-        .loc[final_manifold_data[curv_m]["patch_labels"], "IntGaussian"]
+        final_manifold_data["patch_data"]
+        .loc[final_manifold_data["patch_labels"], "IntGaussian"]
         .values
     )
 
@@ -499,6 +493,14 @@ def growth_mapping(
         )
         results_csv_path = os.path.join(dir_path, "growth_mapping_results.csv")
         results_df.to_csv(results_csv_path, index=False)
-        
+
+        # Save the k-means cluster info
+        np.savez(
+            os.path.join(dir_path, "kmeans_clusters.npz"),
+            initial_centers=initial_kms.cluster_centers_,
+            final_centers=final_kms.cluster_centers_,
+            initial_labels=initial_kms.labels_,
+            final_labels=final_kms.labels_,
+        )
 
     return area_changes, intgaussian_changes, initial_kms, final_kms
