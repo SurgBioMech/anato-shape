@@ -272,6 +272,7 @@ def ProcessManifold(path, quantities, m, progress_queue, prm):
         'MomentInertia': [np.linalg.norm(mesh_clean.moment_inertia)],
     }), GetStatFeatures(manifold_df, quantities)], axis=1)
     progress_queue.put(m)
+    print(f"Processed manifold {scan_name}: {m}")
     return scan_features, manifold_df, cluster_ids
 
 def BatchManifold(paths, quantities, m, progress_queue, progress_counts, progress_bars, prm):
@@ -280,70 +281,83 @@ def BatchManifold(paths, quantities, m, progress_queue, progress_counts, progres
     for path in paths:
         scan_features, manifold_df, cluster_ids = ProcessManifold(path, quantities, m, progress_queue, prm)
         progress_counts[m] += 1
-        progress_bars[m].update(progress(progress_counts[m], len(paths)))
-        if scan_features is not None:
-            results.append((scan_features, manifold_df, cluster_ids))
+        if progress_bars[m]: progress_bars[m].update(progress(progress_counts[m], len(paths)))
+        if scan_features is None:
+            raise ValueError(f"ProcessManifold returned None for path: {path}, m: {m}")
+        results.append((scan_features, manifold_df, cluster_ids))
     return results
 
-def MsetBatchManifold(paths, quantities, m_set, prm, parallel):
-    """Processing function which allows multiple partitioning schemes to be calculated simultaneously or sequentially."""
-    manifold_group, manifold_dict = {}, {}
-    file_names = [file_name_not_ext(path[1]) for path in paths]
+def _store_result(m, result, file_names, m_group, m_dict):
+    """Parses raw results and updates the dictionaries."""
+    if not result or not isinstance(result, list):
+        print(f"Unexpected result format for m={m}: {result}")
+        return
+
+    m_group[m] = [r[0] for r in result]
+    for i, item in enumerate(result):
+        m_dict[(m, file_names[i])] = item[1:]
     
-    if parallel:
-        # Parallel processing
-        overall_progress = display(progress(0, len(m_set) * len(paths)), display_id=True)
-        progress_bars = {m: display(progress(0, len(paths)), display_id=True) for m in m_set}
-        progress_counts = {m: 0 for m in m_set}
+    return m_group, m_dict
 
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            futures = {executor.submit(BatchManifold, paths, quantities, m, queue.Queue(), progress_counts, progress_bars, prm): m for m in m_set}
-
-            total_tasks = len(m_set) * len(paths)
-            overall_progress_value = 0
-            for future in concurrent.futures.as_completed(futures):
-                m = futures[future]
-                try:
-                    result = future.result()
-                    if not result or not isinstance(result, list):
-                        print(f"Unexpected result format for m={m}: {result}")
-                        continue
-
-                    manifold_group[m] = [r[0] for r in result]
-                    for i in range(len(result)):
-                        manifold_dict[(m, file_names[i])] = result[i][1:]
-
-                    overall_progress_value += len(paths)
-                    overall_progress.update(progress(overall_progress_value, total_tasks))
-                except Exception as e:
-                    print(f"Error processing m={m}: {e} (paths={paths}, quantities={quantities})")
-                    continue
-    else:
-        # Sequential processing
-        total_tasks = len(m_set) * len(paths)
-        overall_progress_value = 0
-        overall_progress = display(progress(0, total_tasks), display_id=True)
-        
+def _run_parallel(paths, quantities, m_set, prm, file_names):
+    "Run the BatchManifold function in parallel"
+    m_group, m_dict = {}, {}
+    overall_bar = display(progress(0, len(m_set) * len(paths)), display_id=True)
+    
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        # Submit all tasks
+        futures = {}
         for m in m_set:
-            progress_queue = queue.Queue()
-            progress_counts = {m: 0}
-            progress_bars = {m: display(progress(0, len(paths)), display_id=True)}
-            
-            try:
-                result = BatchManifold(paths, quantities, m, progress_queue, progress_counts, progress_bars, prm)
-                if not result or not isinstance(result, list):
-                    print(f"Unexpected result format for m={m}: {result}")
-                    continue
-                
-                manifold_group[m] = [r[0] for r in result]
-                for i in range(len(result)):
-                    manifold_dict[(m, file_names[i])] = result[i][1:]
+            # Setup specific progress bar for this m
+            p_bar = display(progress(0, len(paths)), display_id=True)
+            futures[executor.submit(BatchManifold, paths, quantities, m, queue.Queue(), {m: 0}, {m: p_bar}, prm)] = m
 
-                overall_progress_value += len(paths)
-                overall_progress.update(progress(overall_progress_value, total_tasks))
+        # Process as they complete
+        progress_count = 0
+        for future in concurrent.futures.as_completed(futures):
+            m = futures[future]
+            try:
+                m_group, m_dict = _store_result(m, future.result(), file_names, m_group, m_dict)
+                
+                # Update overall progress
+                progress_count += len(paths)
+                if overall_bar: overall_bar.update(progress(progress_count, len(m_set) * len(paths)))
             except Exception as e:
-                print(f"Error processing m={m}: {e} (paths={paths}, quantities={quantities})")
-                continue
+                raise ValueError(f"Error processing m={m}: {e}")
+        
+    return m_group, m_dict
+
+def _run_sequential(paths, quantities, m_set, prm, file_names):
+    "Run the BatchManifold function sequentially"
+    m_group, m_dict = {}, {}
+    overall_bar = display(progress(0, len(m_set) * len(paths)), display_id=True)
+    progress_count = 0
+
+    for m in m_set:
+        try:
+            # Setup specific progress bar for this m
+            p_bar = display(progress(0, len(paths)), display_id=True)
+            
+            # Run blocking call
+            result = BatchManifold(paths, quantities, m, queue.Queue(), {m: 0}, {m: p_bar}, prm)
+            m_group, m_dict = _store_result(m, result, file_names, m_group, m_dict)
+
+            # Update overall progress
+            progress_count += len(paths)
+            if overall_bar: overall_bar.update(progress(progress_count, len(m_set) * len(paths)))
+        except Exception as e:
+            raise ValueError(f"Error processing m={m}: {e}")
+
+    return m_group, m_dict
+
+def MsetBatchManifold(paths, quantities, m_set, prm, parallel):
+    """Processing function which allows multiple partitioning schemes to be executed"""
+    file_names = [file_name_not_ext(path[1]) for path in paths]
+
+    if parallel:
+        manifold_group, manifold_dict = _run_parallel(paths, quantities, m_set, prm, file_names)
+    else:
+        manifold_group, manifold_dict = _run_sequential(paths, quantities, m_set, prm, file_names)
 
     return manifold_group, manifold_dict
 
