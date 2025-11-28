@@ -216,7 +216,6 @@ def align_segment(args):
             f"Segment {i} mismatch: source {source_idx.shape[0]}, transformed {TY.shape[0]}"
         )
 
-    print(f"Segment {i+1} aligned.")
     return i, TY
 
 
@@ -398,6 +397,7 @@ def growth_mapping(
     if unravel:
         # Perform unraveling
         initial_unraveled_grps = unravel_elems(
+            initial_manifold_data["name"],
             initial_mesh,
             cline_initial_pos,
             cline_initial_div,
@@ -407,6 +407,7 @@ def growth_mapping(
             dir_path=dir_path,
         )
         final_unraveled_grps = unravel_elems(
+            final_manifold_data["name"],
             final_mesh,
             cline_final_pos,
             cline_final_div,
