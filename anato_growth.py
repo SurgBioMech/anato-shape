@@ -254,24 +254,22 @@ def segment_registration(
 
     trans_source_triangles_center = source_mesh.triangles_center.copy()
 
-    if parallel and not plot_figures:
-        args_list = []
-        for i in range(n_segments):
-            args_list.append(
-                (
-                    i,
-                    source_mesh.triangles_center,
-                    target_mesh.triangles_center,
-                    source_grps[i][0],
-                    target_grps[i][0],
-                    alpha,
-                    beta,
-                    max_iterations,
-                    plot_figures,
-                    dir_path,
-                )
-            )
+    args_list = []
+    for i in range(n_segments):
+        args_list.append(
+            i,
+            source_mesh.triangles_center,
+            target_mesh.triangles_center,
+            source_grps[i][0],
+            target_grps[i][0],
+            alpha,
+            beta,
+            max_iterations,
+            plot_figures,
+            dir_path,
+        )
 
+    if parallel and not plot_figures:
         n_jobs = min(n_segments, os.cpu_count())
         with mp.Pool(processes=n_jobs) as pool:
             results = pool.map(align_segment, args_list)
@@ -280,20 +278,7 @@ def segment_registration(
             trans_source_triangles_center[source_grps[i][0], :] = TY
     else:
         for i in range(n_segments):
-            _, TY = align_segment(
-                (
-                    i,
-                    source_mesh.triangles_center,
-                    target_mesh.triangles_center,
-                    source_grps[i][0],
-                    target_grps[i][0],
-                    alpha,
-                    beta,
-                    max_iterations,
-                    plot_figures,
-                    dir_path,
-                )
-            )
+            _, TY = align_segment(align_args)
             trans_source_triangles_center[source_grps[i][0], :] = TY
 
     return trans_source_triangles_center

@@ -6,6 +6,7 @@ import plotly.graph_objects as go
 from scipy.spatial import ConvexHull
 from scipy.spatial.distance import pdist, squareform
 from sklearn.decomposition import PCA
+from plotly.subplots import make_subplots
 
 ANGLE_THRESHOLD_RATIO = (
     0.85  # Ratio of max angle to consider for candidate cline points
@@ -13,6 +14,7 @@ ANGLE_THRESHOLD_RATIO = (
 SEARCH_REGION_FRACTION = (
     1 / 12
 )  # Fraction of cline length to search around closest point
+AVG_POINTS_PER_SLICE = 200  # Average number of points per Z-slice during unraveling
 
 
 def _safe_normalize(v, axis=-1, eps=1e-12):
@@ -213,7 +215,7 @@ def _straighten_vertices(
 def _build_slice_topology_graph(points_2d):
     """
     Constructs a connected graph for points in a 2D slice.
-    Uses k-NN + Convex Hull + Component connection to ensure continuity.
+    Robust to sparse slices (2 points) and degenerate geometry.
     """
     num_pts = points_2d.shape[0]
     pairwise = squareform(pdist(points_2d))
@@ -222,39 +224,49 @@ def _build_slice_topology_graph(points_2d):
     # ----------------------
     # Sort neighbors by distance
     ascend_idx = np.argsort(pairwise, axis=1)
-    last_connect = min(5, num_pts)
+
+    # Robust connection count: ensure at least 1 neighbor is picked if available
+    k_neighbors = min(5, num_pts - 1) if num_pts > 1 else 0
 
     # Create adjacency matrix (distance weights)
     d2 = np.zeros_like(pairwise)
-    for j in range(num_pts):
-        neighbors = ascend_idx[j, 1 : last_connect + 1]  # Skip self (index 0)
-        if neighbors.size > 0:
-            d2[j, neighbors] = pairwise[j, neighbors]
-            d2[neighbors, j] = pairwise[neighbors, j]
+
+    if num_pts > 1:
+        for j in range(num_pts):
+            # Skip self (index 0), take top k neighbors
+            neighbors = ascend_idx[j, 1 : k_neighbors + 1]
+            if neighbors.size > 0:
+                d2[j, neighbors] = pairwise[j, neighbors]
+                d2[neighbors, j] = pairwise[neighbors, j]
 
     # 2. Convex Hull (Close the loop)
-    try:
-        hull = ConvexHull(points_2d)
-        hull_indices = hull.vertices
-        for m in range(len(hull_indices)):
-            a = hull_indices[m]
-            b = hull_indices[(m + 1) % len(hull_indices)]
-            d2[a, b] = pairwise[a, b]
-            d2[b, a] = pairwise[b, a]
-    except Exception:
-        raise RuntimeError("Convex Hull failed; possibly degenerate point set.")
+    # -------------------------------
+    # CHANGE: Only attempt Hull if we have enough points (>=3)
+    # and fail gracefully if points are collinear.
+    if num_pts >= 3:
+        try:
+            hull = ConvexHull(points_2d)
+            hull_indices = hull.vertices
+            for m in range(len(hull_indices)):
+                a = hull_indices[m]
+                b = hull_indices[(m + 1) % len(hull_indices)]
+                d2[a, b] = pairwise[a, b]
+                d2[b, a] = pairwise[b, a]
+        except Exception:
+            # If Hull fails (e.g., collinear points), we fall back
+            # to the connections made by k-NN above.
+            pass
 
     # 3. Create Graph
     # ---------------
     G = nx.Graph()
     rows, cols = np.where(d2 > 0)
-    # Add edges (weights)
-    # (Iterating zip is faster/cleaner than nested loops for sparse addition)
+
     for r, c in zip(rows, cols):
         if r < c:  # Avoid duplicates
             G.add_edge(r, c, weight=float(d2[r, c]))
 
-    # Ensure all nodes exist
+    # Ensure all nodes exist (handles isolated points)
     for node in range(num_pts):
         if node not in G:
             G.add_node(node)
@@ -269,16 +281,20 @@ def _build_slice_topology_graph(points_2d):
 
         for comp in comps[1:]:
             for lone_node in comp:
-                # Find nearest node that belongs to the main component d
                 found = None
-                for candidate in ascend_idx[lone_node]:
-                    if candidate in main_nodes:
-                        found = candidate
-                        break
+                # Try to find a neighbor in the main component
+                if num_pts > 1:
+                    for candidate in ascend_idx[lone_node]:
+                        if candidate in main_nodes:
+                            found = candidate
+                            break
 
-                # Absolute fallback
+                # Absolute fallback: connect to closest point
                 if found is None:
-                    found = int(np.argmin(pairwise[lone_node]))
+                    # Exclude self from argmin
+                    others = pairwise[lone_node].copy()
+                    others[lone_node] = np.inf
+                    found = int(np.argmin(others))
 
                 G.add_edge(lone_node, found, weight=float(pairwise[lone_node, found]))
 
@@ -336,19 +352,25 @@ def _apply_post_process_flip(twod_vertices, straightened_line, straightened_vert
 
 
 def unravel(
+    name: str,
     vertices: np.ndarray,
     vertex_normals: np.ndarray,
     cline: np.ndarray,
     cline_deriv1: np.ndarray,
+    plot_figures: bool = False,
+    dir_path: str = None,
 ):
     """
     Unravels a 3D mesh defined by vertices and vertex normals along a given centerline
     and its first derivative (tangent).
     Inputs:
+    - name: Name identifier for the mesh (used in plotting)
     - vertices: (n,3) array of vertex coordinates
     - vertex_normals: (n,3) array of normals per vertex
     - cline: (k,3) centerline points
     - cline_deriv1: (k,3) first derivative (tangent) of centerline points
+    - plot_figures: Whether to generate debugging plots
+    - dir_path: Directory path to save figures if plotting is enabled
 
     Outputs:
         - twod_vertices: (n,2) array of 2D coordinates after unraveling
@@ -382,7 +404,7 @@ def unravel(
     # Define slices
     zmin = np.nanmin(slicing_ref[:, 2]) - 1e-6
     zmax = np.nanmax(slicing_ref[:, 2]) + 1e-6
-    zs = np.linspace(zmin, zmax, 100)
+    zs = np.linspace(zmin, zmax, int(slicing_ref.shape[0] / AVG_POINTS_PER_SLICE))
 
     for zi in range(len(zs) - 1):
         # Identify nodes in this Z-slab
@@ -392,15 +414,19 @@ def unravel(
         if slice_idx.size == 0:
             continue
 
+        if plot_figures and dir_path is not None:
+            fig = plot_unravel_slice(
+                vertices, straightened_vertices, slicing_ref, slice_idx
+            )
+            os.makedirs(os.path.join(dir_path, "unravel_slices_figs"), exist_ok=True)
+            fig_filename = os.path.join(
+                dir_path, "unravel_slices_figs", f"{name}_unravel_zslice_{zi:03d}.html"
+            )
+            fig.write_html(fig_filename)
+
         # Extract local X, Y, Z for this slice
         # Note: We use X and Y for topology (graph), Z is just passed through
         slice_pts_3d = slicing_ref[slice_idx]
-
-        # Handle edge case: Single point slice
-        if slice_pts_3d.shape[0] == 1:
-            x_sign = -1 if slice_pts_3d[0, 0] < 0 else 1
-            twod_vertices[slice_idx[0]] = np.array([0.0 * x_sign, slice_pts_3d[0, 2]])
-            continue
 
         # A. Build Topology (Graph) for this slice
         xy_local = slice_pts_3d[:, :2]
@@ -422,6 +448,75 @@ def unravel(
             twod_vertices, straightened_line, straightened_vertices
         )
     return twod_vertices, straightened_line, straightened_vertices
+
+
+def plot_unravel_slice(vertices, straightened_vertices, slicing_ref, slice_idx):
+    """
+    Interactive 3D Plotly visualization of a single slice in the unraveling process.
+    """
+    # Create side-by-side 3D subplots: left = straightened + slice, right = original vertices + slice
+    fig = make_subplots(
+        rows=1,
+        cols=2,
+        specs=[[{"type": "scene"}, {"type": "scene"}]],
+        subplot_titles=("Straightened + Slice", "Original Vertices + Slice"),
+    )
+
+    # Left: straightened mesh (lightgray) and slice points (red)
+    fig.add_trace(
+        go.Scatter3d(
+            x=straightened_vertices[:, 0],
+            y=straightened_vertices[:, 1],
+            z=straightened_vertices[:, 2],
+            mode="markers",
+            marker=dict(size=2, color="lightgray"),
+            name="straightened_mesh",
+        ),
+        row=1,
+        col=1,
+    )
+    fig.add_trace(
+        go.Scatter3d(
+            x=slicing_ref[slice_idx, 0],
+            y=slicing_ref[slice_idx, 1],
+            z=slicing_ref[slice_idx, 2],
+            mode="markers",
+            marker=dict(size=5, color="red"),
+            name="slice_points_straightened",
+        ),
+        row=1,
+        col=1,
+    )
+
+    # Right: original vertices (blue) and corresponding original-slice points (red)
+    fig.add_trace(
+        go.Scatter3d(
+            x=vertices[:, 0],
+            y=vertices[:, 1],
+            z=vertices[:, 2],
+            mode="markers",
+            marker=dict(size=2, color="lightblue"),
+            name="original_vertices",
+        ),
+        row=1,
+        col=2,
+    )
+    # highlight the same indices in the original vertex cloud
+    fig.add_trace(
+        go.Scatter3d(
+            x=vertices[slice_idx, 0],
+            y=vertices[slice_idx, 1],
+            z=vertices[slice_idx, 2],
+            mode="markers",
+            marker=dict(size=5, color="red"),
+            name="slice_points_original",
+        ),
+        row=1,
+        col=2,
+    )
+
+    fig.update_layout(height=600, width=1100, showlegend=False)
+    return fig
 
 
 def plot_unravel_groups(twodvertices, points, cline, grps, mdiv, ndiv, marker_size=3):
@@ -573,7 +668,13 @@ def unravel_elems(
 
     # ---- Unravel the COMs into 2D ----
     twodvertices, _, _ = unravel(
-        mesh.triangles_center, mesh.face_normals, cline, cline1stderiv
+        name,
+        mesh.triangles_center,
+        mesh.face_normals,
+        cline,
+        cline1stderiv,
+        plot_figures=plot_figures,
+        dir_path=dir_path,
     )
 
     # ---- Determine global bounds for divisions ----
