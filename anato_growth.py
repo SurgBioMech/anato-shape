@@ -16,19 +16,68 @@ from sklearn.cluster import KMeans
 from anato_unravel import unravel_elems
 
 
-def plot_registration(source, target, transformation):
-    source_temp = copy.deepcopy(source)
-    target_temp = copy.deepcopy(target)
-    source_temp.paint_uniform_color([1, 0.706, 0])
-    target_temp.paint_uniform_color([0, 0.651, 0.929])
-    source_temp.transform(transformation)
-    o3d.visualization.draw_geometries(
-        [source_temp, target_temp],
-        zoom=0.4459,
-        front=[0.9288, -0.2951, -0.2242],
-        lookat=[1.6784, 2.0612, 1.4451],
-        up=[-0.3402, -0.9189, -0.1996],
+def plot_registration(source, target, transformation, save_path=None, show=False):
+    """
+    Create a Plotly 3D figure showing source (transformed) and target point clouds,
+    optionally save it to file, and return the figure object.
+
+    Args:
+        source: open3d.geometry.PointCloud or any object with .points (iterable of 3D points)
+        target: open3d.geometry.PointCloud or any object with .points
+        transformation: 4x4 transformation matrix to apply to source
+        save_path: optional path to save the figure. 
+        show: whether to call fig.show() 
+
+    Returns:
+        fig: plotly.graph_objects.Figure
+    """
+    # copy and transform source so we don't mutate inputs
+    src_temp = copy.deepcopy(source)
+    tgt_temp = copy.deepcopy(target)
+
+    src_temp.transform(transformation)
+    src_pts = np.asarray(src_temp.points)
+    tgt_pts = np.asarray(tgt_temp.points)
+
+
+    # build Plotly figure
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter3d(
+            x=tgt_pts[:, 0],
+            y=tgt_pts[:, 1],
+            z=tgt_pts[:, 2],
+            mode="markers",
+            marker=dict(size=2, color="#00A6EE", opacity=0.7),
+            name="Target (final)",
+        )
     )
+    fig.add_trace(
+        go.Scatter3d(
+            x=src_pts[:, 0],
+            y=src_pts[:, 1],
+            z=src_pts[:, 2],
+            mode="markers",
+            marker=dict(size=2, color="#FFB400", opacity=0.7),
+            name="Source (transformed)",
+        )
+    )
+    fig.update_layout(
+        title="Registration result",
+        scene=dict(xaxis_title="X", yaxis_title="Y", zaxis_title="Z"),
+        width=800,
+        height=600,
+    )
+
+    # show in notebook or interactive session
+    if show:
+        fig.show()
+
+    # save file if requested
+    if save_path:
+        fig.write_html(save_path)
+
+    return fig
 
 
 def calculate_translation_matrix(pcd_source, pcd_target):
@@ -51,7 +100,7 @@ def calculate_translation_matrix(pcd_source, pcd_target):
     translation_vector = center_target - center_source
 
     # Create 4x4 homogeneous transformation matrix
-    transformation_matrix = np.eye(4)
+    transformation_matrix = np.eye(4, dtype=np.float64)
     transformation_matrix[:3, 3] = translation_vector
 
     return transformation_matrix
@@ -256,6 +305,7 @@ def growth_mapping(
     manifold_curvatures: pd.DataFrame,
     curv_m: int = 1,
     plot_figures: bool = False,
+    dir_path: Optional[str] = None,
     parallel: bool = False,
     unravel: bool = False,
     mdiv: int = 1,
@@ -288,6 +338,7 @@ def growth_mapping(
         ncluster (int): Number of clusters for k-means.
         manifold_curvatures (pd.DataFrame): DataFrame from GetAnatoMeshResults containing manifold curvature data for both meshes.
         curv_m (int): m value to use for manifold_curvatures
+        dir_path (str, optional): Directory path to save intermediate results. If None, no files are saved.
         plot_figures (bool): Whether to plot figures during processing.
         parallel (bool): Whether to use parallel processing for segment registration.
 
@@ -306,14 +357,20 @@ def growth_mapping(
         initial_kms (KMeans): KMeans object for initial mesh clustering.
         final_kms (KMeans): KMeans object for final mesh clustering.
     """
-
     print("Performing rigid registration")
     initial_pcd = o3d.geometry.PointCloud()
     final_pcd = o3d.geometry.PointCloud()
-    initial_pcd.points = o3d.utility.Vector3dVector(initial_mesh.vertices)
-    final_pcd.points = o3d.utility.Vector3dVector(final_mesh.vertices)
-    initial_pcd.normals = o3d.utility.Vector3dVector(initial_mesh.vertex_normals)
-    final_pcd.normals = o3d.utility.Vector3dVector(final_mesh.vertex_normals)
+
+    iv_cpy = initial_mesh.vertices.copy().astype(np.float64)
+    fv_cpy = final_mesh.vertices.copy().astype(np.float64)
+    initial_pcd.points = o3d.utility.Vector3dVector(iv_cpy)
+    final_pcd.points = o3d.utility.Vector3dVector(fv_cpy)
+
+    ivn_cpy = initial_mesh.vertex_normals.copy().astype(np.float64)
+    fvn_cpy = final_mesh.vertex_normals.copy().astype(np.float64)
+
+    initial_pcd.normals = o3d.utility.Vector3dVector(ivn_cpy)
+    final_pcd.normals = o3d.utility.Vector3dVector(fvn_cpy)
 
     translation_matrix = calculate_translation_matrix(initial_pcd, final_pcd)
     icp_result = o3d.pipelines.registration.registration_icp(
@@ -327,7 +384,7 @@ def growth_mapping(
     initial_translated_mesh.apply_transform(icp_result.transformation)
 
     if plot_figures:
-        plot_registration(initial_pcd, final_pcd, icp_result.transformation)
+        fig = plot_registration(initial_pcd, final_pcd, icp_result.transformation, save_path=os.path.join(dir_path, "rigid_registration.html") if dir_path else None)
 
     if unravel:
         # Perform unraveling
@@ -426,5 +483,22 @@ def growth_mapping(
     area_changes = np.maximum(0, area_changes)
 
     intgaussian_changes = final_Ks - initial_Ks
+
+    if dir_path:
+        # Save results to CSV
+        results_df = pd.DataFrame(
+            {
+                "Cluster": np.arange(ncluster),
+                "AreaChange": area_changes,
+                "InitialIntGaussian": initial_Ks,
+                "FinalIntGaussian": final_Ks,
+                "IntGaussianChange": intgaussian_changes,
+                "InitialArea": initial_As,
+                "FinalArea": final_As,
+            }
+        )
+        results_csv_path = os.path.join(dir_path, "growth_mapping_results.csv")
+        results_df.to_csv(results_csv_path, index=False)
+        
 
     return area_changes, intgaussian_changes, initial_kms, final_kms

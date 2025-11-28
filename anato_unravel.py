@@ -534,7 +534,7 @@ def plot_unravel_groups(twodvertices, points, cline, grps, mdiv, ndiv, marker_si
     return fig
 
 
-def unravel_elems(mesh, cline, cline1stderiv, m, n, plot_figures=False):
+def unravel_elems(mesh, cline, cline1stderiv, m, n, plot_figures=False, dir_path=None):
     """
     This function projects 3D mesh face centers onto a 2D plane using an unraveling
     function, then divides them into a grid of groups based on their positions relative
@@ -557,6 +557,8 @@ def unravel_elems(mesh, cline, cline1stderiv, m, n, plot_figures=False):
         of total centerline length (e.g., m=[0, 0.1, 0.3, 1.0]).
     plot_figures : bool
         Whether to plot the unraveling results.
+    dir_path : str, optional
+        Directory path to save intermediate results. If None, no files are saved.
     Returns
     grps : list of list of numpy.ndarray
         A 2D list (m_eff x n_eff) where each element contains indices of faces
@@ -630,6 +632,7 @@ def unravel_elems(mesh, cline, cline1stderiv, m, n, plot_figures=False):
         fig = plot_unravel_groups(
             twodvertices, mesh.triangles_center, cline, grps, m_eff, n_eff
         )
-        fig.show()
+        if dir_path: 
+            fig.write_html(os.path.join(dir_path, "unravel_groups.html"))
 
     return grps
