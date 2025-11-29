@@ -257,16 +257,18 @@ def segment_registration(
     args_list = []
     for i in range(n_segments):
         args_list.append(
-            i,
-            source_mesh.triangles_center,
-            target_mesh.triangles_center,
-            source_grps[i][0],
-            target_grps[i][0],
-            alpha,
-            beta,
-            max_iterations,
-            plot_figures,
-            dir_path,
+            (
+                i,
+                source_mesh.triangles_center,
+                target_mesh.triangles_center,
+                source_grps[i][0],
+                target_grps[i][0],
+                alpha,
+                beta,
+                max_iterations,
+                plot_figures,
+                dir_path,
+            )
         )
 
     if parallel and not plot_figures:
@@ -278,7 +280,7 @@ def segment_registration(
             trans_source_triangles_center[source_grps[i][0], :] = TY
     else:
         for i in range(n_segments):
-            _, TY = align_segment(align_args)
+            _, TY = align_segment(args_list[i])
             trans_source_triangles_center[source_grps[i][0], :] = TY
 
     return trans_source_triangles_center
