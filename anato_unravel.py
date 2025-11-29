@@ -7,6 +7,7 @@ from scipy.spatial import ConvexHull
 from scipy.spatial.distance import pdist, squareform
 from sklearn.decomposition import PCA
 from plotly.subplots import make_subplots
+from scipy.spatial import cKDTree
 
 ANGLE_THRESHOLD_RATIO = (
     0.85  # Ratio of max angle to consider for candidate cline points
@@ -14,6 +15,10 @@ ANGLE_THRESHOLD_RATIO = (
 SEARCH_REGION_FRACTION = (
     1 / 12
 )  # Fraction of cline length to search around closest point
+
+CLINE_NEIGHBORHOOD_FRAC = (
+    0.01  # Fraction of centerline points to consider for straightening vertices
+)
 AVG_POINTS_PER_SLICE = 200  # Average number of points per Z-slice during unraveling
 
 
@@ -145,70 +150,83 @@ def _straighten_vertices(
     vertices: np.ndarray,
     vertex_normals: np.ndarray,
     cline: np.ndarray,
+    cline_tangents: np.ndarray,
     rotation_matrices: np.ndarray,
     straightened_line: np.ndarray,
 ):
     """
-    Straighten the mesh vertices according to the centerline and its first derivative.
-    The straightening aligns the centerline along the z-axis and rotates the mesh accordingly.
-
-    Inputs:
-    - vertices: (n,3) array of vertex coordinates
-    - vertex_normals: (n,3) array of normals per vertex
-    - cline: (k,3) centerline points
-    - rotation_matrices: (k,3,3) rotation matrices along the centerline
-    - straightened_line: (k,3) straightened centerline points
-    Outputs:
-        - straightened_vertices: (n,3) vertices after straightening
+    Straightens vertices along the centerline using rotation matrices and projections.
     """
     n = vertices.shape[0]
-    k = cline.shape[0]
+    m = cline.shape[0]
 
-    # Straighten each vertex by rotating local tangent to [0,0,1] then translating to straightened_line[idx]
-    straightened_vertices = np.full((n, 3), np.nan, dtype=float)
-    unit_vertex_normals = _safe_normalize(vertex_normals)
+    tree = cKDTree(cline)
 
-    # For each vertex, find closest cline point based on angle with normal and distance
+    # Find the 'k_smooth' nearest centerline points for every vertex
+    k_smooth = int(m * CLINE_NEIGHBORHOOD_FRAC)
+    dists, indices = tree.query(vertices, k=k_smooth)
+
+    straightened_vertices = np.zeros((n, 3), dtype=float)
+
     for i in range(n):
-        u = unit_vertex_normals[i]
-        # compute angle between u and vector from vertex to each cline point
-        vecs = cline - vertices[i]  # shape (k,3)
-        dists = np.linalg.norm(vecs, axis=1)
-        # avoid divide by zero
+        # We will accumulate weighted Z, X, and Y values
+        weights = []
+        z_candidates = []
+        xy_candidates = []
 
-        # Smart search for closest point (using normals)
-        with np.errstate(invalid="ignore"):
-            uv = vecs / np.maximum(dists[:, None], 1e-12)
-            cos_theta = np.clip((uv @ u), -1.0, 1.0)
-            theta_deg = np.degrees(np.arccos(cos_theta))
+        # Current vertex position
+        v_pos = vertices[i]
 
-        idc1 = int(np.argmin(dists))
-        search_region = max(1, int(round(k * SEARCH_REGION_FRACTION)))
-        start_pt = max(0, idc1 - search_region)
-        end_pt = min(k, idc1 + search_region + 1)
-        centerline_look = np.arange(start_pt, end_pt)
+        for j in range(k_smooth):
+            idx = indices[i, j]
+            if idx >= m:
+                continue  # Safety check
 
-        if centerline_look.size == 0:
-            centerline_look = np.arange(k)
+            # --- Perform Projection for this specific centerline node ---
+            # Vector from centerline node to vertex
+            vec = v_pos - cline[idx]
 
-        narrowed_angles = theta_deg[centerline_look]
-        max_angle = np.max(narrowed_angles)
-        mask = narrowed_angles > ANGLE_THRESHOLD_RATIO * max_angle
-        candidate_indices = centerline_look[mask]
+            # Tangent at this node
+            tangent = cline_tangents[idx]
+            # Normalize tangent
+            tangent = tangent / (np.linalg.norm(tangent) + 1e-12)
 
-        if len(candidate_indices) == 0:
-            # Fallback if filtering removes all points
-            chosen_local = idc1
-        else:
-            cand_dists = np.linalg.norm(vertices[i] - cline[candidate_indices], axis=1)
-            chosen_local = candidate_indices[int(np.argmin(cand_dists))]
+            # Project onto tangent to get local Z offset
+            proj_dist = np.dot(vec, tangent)
 
-        R = rotation_matrices[chosen_local]
+            # Calculate Global Z for this candidate
+            # (Centerline Z + Local Offset)
+            candidate_z = straightened_line[idx, 2] + proj_dist
 
-        vec = vertices[i] - cline[chosen_local]
-        rotated_vec = R.dot(vec)
-        straightened_vertices[i] = straightened_line[chosen_local] + rotated_vec
-        # ------------------------------
+            # Calculate XY (Planar) position
+            planar_vec = vec - (proj_dist * tangent)
+            R = rotation_matrices[idx]
+            rotated_planar = R.dot(planar_vec)
+
+            candidate_xy = straightened_line[idx, :2] + rotated_planar[:2]
+
+            # Inverse distance weighting (closer nodes have more influence)
+            w = 1.0 / (dists[i, j] + 1e-6)
+
+            weights.append(w)
+            z_candidates.append(candidate_z)
+            xy_candidates.append(candidate_xy)
+
+        # --- Weighted Average ---
+        weights = np.array(weights)
+        total_w = np.sum(weights)
+
+        # Normalize weights
+        norm_w = weights / total_w
+
+        # Compute final blended coordinates
+        final_z = np.dot(norm_w, z_candidates)
+        final_xy = np.dot(norm_w, np.array(xy_candidates))
+
+        straightened_vertices[i, 0] = final_xy[0]
+        straightened_vertices[i, 1] = final_xy[1]
+        straightened_vertices[i, 2] = final_z
+
     return straightened_vertices
 
 
@@ -391,7 +409,12 @@ def unravel(
 
     # Straighten vertices
     straightened_vertices = _straighten_vertices(
-        vertices, vertex_normals, cline, rotation_matrices, straightened_line
+        vertices,
+        vertex_normals,
+        cline,
+        cline_deriv1,  # Pass tangents here
+        rotation_matrices,
+        straightened_line,
     )
 
     # Prepare for Unraveling
