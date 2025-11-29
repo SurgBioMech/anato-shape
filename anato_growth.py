@@ -16,36 +16,27 @@ from sklearn.cluster import KMeans
 from anato_unravel import unravel_elems
 
 
-def plot_registration(source, target, transformation, save_path=None, show=False):
+def plot_registration(source_transformed, target, save_path=None, show=False):
     """
     Create a Plotly 3D figure showing source (transformed) and target point clouds,
     optionally save it to file, and return the figure object.
 
     Args:
-        source: open3d.geometry.PointCloud or any object with .points (iterable of 3D points)
-        target: open3d.geometry.PointCloud or any object with .points
-        transformation: 4x4 transformation matrix to apply to source
+        source_transformed: array-like, transformed source point cloud.
+        target: array-like, target point cloud.
         save_path: optional path to save the figure.
         show: whether to call fig.show()
 
     Returns:
         fig: plotly.graph_objects.Figure
     """
-    # copy and transform source so we don't mutate inputs
-    src_temp = copy.deepcopy(source)
-    tgt_temp = copy.deepcopy(target)
-
-    src_temp.transform(transformation)
-    src_pts = np.asarray(src_temp.points)
-    tgt_pts = np.asarray(tgt_temp.points)
-
     # build Plotly figure
     fig = go.Figure()
     fig.add_trace(
         go.Scatter3d(
-            x=tgt_pts[:, 0],
-            y=tgt_pts[:, 1],
-            z=tgt_pts[:, 2],
+            x=target[:, 0],
+            y=target[:, 1],
+            z=target[:, 2],
             mode="markers",
             marker=dict(size=2, color="#00A6EE", opacity=0.7),
             name="Target (final)",
@@ -53,9 +44,9 @@ def plot_registration(source, target, transformation, save_path=None, show=False
     )
     fig.add_trace(
         go.Scatter3d(
-            x=src_pts[:, 0],
-            y=src_pts[:, 1],
-            z=src_pts[:, 2],
+            x=source_transformed[:, 0],
+            y=source_transformed[:, 1],
+            z=source_transformed[:, 2],
             mode="markers",
             marker=dict(size=2, color="#FFB400", opacity=0.7),
             name="Source (transformed)",
@@ -106,7 +97,14 @@ def calculate_translation_matrix(pcd_source, pcd_target):
 
 
 def save_segment_registration(
-    iteration, error, X, Y, dir_path=None, max_iterations=None, division=None
+    iteration,
+    error,
+    X,
+    Y,
+    dir_path=None,
+    max_iterations=None,
+    division=None,
+    segment=None,
 ):
     """
     Saves a snapshot of the registration process to disk.
@@ -147,7 +145,7 @@ def save_segment_registration(
 
     # Update Layout
     fig.update_layout(
-        title=f"Division {division+1} — Iter {iteration} (Error: {error:.4f})",
+        title=f"Division {division+1} Segment {segment+1} — Iter {iteration} (Error: {error:.4f})",
         scene=dict(xaxis_title="X", yaxis_title="Y", zaxis_title="Z"),
         width=800,
         height=600,
@@ -156,7 +154,9 @@ def save_segment_registration(
 
     os.makedirs(os.path.join(dir_path, "segment_alignment_figs"), exist_ok=True)
     filename = os.path.join(
-        dir_path, "segment_alignment_figs", f"div{division}_iter_{iteration:04d}.html"
+        dir_path,
+        "segment_alignment_figs",
+        f"{division}_{segment}_iter_{iteration:04d}.html",
     )
     fig.write_html(filename)
 
@@ -168,6 +168,7 @@ def align_segment(args):
     """
     (
         i,
+        j,
         source_centers,
         target_centers,
         source_idx,
@@ -179,7 +180,7 @@ def align_segment(args):
         dir_path,
     ) = args
 
-    print(f"Aligning segment {i+1}")
+    print(f"Aligning segment {i+1}_{j+1}")
 
     Y = o3d.geometry.PointCloud(
         o3d.utility.Vector3dVector(source_centers[source_idx, :])
@@ -204,6 +205,7 @@ def align_segment(args):
             dir_path=dir_path,
             max_iterations=max_iterations,
             division=i,
+            segment=j,
         )
         if plot_figures
         else None
@@ -224,7 +226,8 @@ def segment_registration(
     target_mesh,
     source_grps,
     target_grps,
-    n_segments,
+    m,
+    n,
     alpha,
     beta,
     max_iterations,
@@ -240,7 +243,8 @@ def segment_registration(
     - target_mesh: The target mesh object.
     - source_grps: List of groups (segments) in the source mesh.
     - target_grps: List of groups (segments) in the target mesh.
-    - n_segments: Number of segments to register.
+    - m: number of segments along the centerline.
+    - n: number of segments around the centerline.
     - alpha: Regularization parameter alpha for deformable registration.
     - beta: Regularization parameter beta for deformable registration.
     - max_iterations: Maximum number of iterations for registration.
@@ -255,33 +259,38 @@ def segment_registration(
     trans_source_triangles_center = source_mesh.triangles_center.copy()
 
     args_list = []
-    for i in range(n_segments):
-        args_list.append(
-            (
-                i,
-                source_mesh.triangles_center,
-                target_mesh.triangles_center,
-                source_grps[i][0],
-                target_grps[i][0],
-                alpha,
-                beta,
-                max_iterations,
-                plot_figures,
-                dir_path,
+    for i in range(m):
+        for j in range(n):
+            args_list.append(
+                (
+                    i,
+                    j,
+                    source_mesh.triangles_center,
+                    target_mesh.triangles_center,
+                    source_grps[i][j],
+                    target_grps[i][j],
+                    alpha,
+                    beta,
+                    max_iterations,
+                    plot_figures,
+                    dir_path,
+                )
             )
-        )
 
     if parallel and not plot_figures:
-        n_jobs = min(n_segments, os.cpu_count())
+        n_jobs = min(m * n, os.cpu_count())
         with mp.Pool(processes=n_jobs) as pool:
             results = pool.map(align_segment, args_list)
 
-        for i, TY in results:
-            trans_source_triangles_center[source_grps[i][0], :] = TY
+        for idx, TY in results:
+            i, j = divmod(idx, n)
+            trans_source_triangles_center[source_grps[i][j], :] = TY
     else:
-        for i in range(n_segments):
-            _, TY = align_segment(args_list[i])
-            trans_source_triangles_center[source_grps[i][0], :] = TY
+        for idx in range(m * n):
+            _, TY = align_segment(args_list[idx])
+
+            i, j = divmod(idx, n)
+            trans_source_triangles_center[source_grps[i][j], :] = TY
 
     return trans_source_triangles_center
 
@@ -297,6 +306,7 @@ def growth_mapping(
     parallel: bool = False,
     unravel: bool = False,
     mdiv: int = 1,
+    ndiv: int = 1,
     alpha: float = 1.0,
     beta: float = 10.0,
     cline_initial_pos: Optional[np.ndarray] = None,
@@ -333,7 +343,8 @@ def growth_mapping(
 
         For unraveling:
             unravel (bool): Whether to perform unraveling and segment-wise registration.
-            mdiv (int): Number of divisions for unraveling.
+            mdiv (int): Number of divisions along centerline for unraveling.
+            ndiv (int): Number of divisions perpendicular to centerline for unraveling.
             alpha (float): Alpha parameter for deformable registration.
             beta (float): Beta parameter for deformable registration.
             cline_initial_pos (np.ndarray): Centerline positions for initial mesh.
@@ -375,9 +386,8 @@ def growth_mapping(
     if plot_figures:
         assert dir_path is not None, "dir_path must be provided to save figures"
         fig = plot_registration(
-            initial_pcd,
-            final_pcd,
-            icp_result.transformation,
+            np.asarray(initial_translated_mesh.triangles_center),
+            np.asarray(final_mesh.triangles_center),
             save_path=(os.path.join(dir_path, "rigid_registration.html")),
         )
 
@@ -389,7 +399,7 @@ def growth_mapping(
             cline_initial_pos,
             cline_initial_div,
             m=mdiv,
-            n=1,
+            n=ndiv,
             plot_figures=plot_figures,
             dir_path=dir_path,
         )
@@ -399,7 +409,7 @@ def growth_mapping(
             cline_final_pos,
             cline_final_div,
             m=mdiv,
-            n=1,
+            n=ndiv,
             plot_figures=plot_figures,
             dir_path=dir_path,
         )
@@ -410,7 +420,8 @@ def growth_mapping(
             final_mesh,
             initial_unraveled_grps,
             final_unraveled_grps,
-            n_segments=mdiv,
+            m=mdiv,
+            n=ndiv,
             alpha=1,
             beta=10,
             max_iterations=30,
@@ -418,6 +429,14 @@ def growth_mapping(
             dir_path=dir_path,
             parallel=parallel,
         )
+
+        if plot_figures:
+            # Plot final registration result
+            fig = plot_registration(
+                np.asarray(aligned_source_triangles_center),
+                np.asarray(final_mesh.triangles_center),
+                save_path=(os.path.join(dir_path, "final_registration.html")),
+            )
     else:
         aligned_source_triangles_center = initial_translated_mesh.triangles_center
 
