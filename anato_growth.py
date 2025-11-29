@@ -16,36 +16,27 @@ from sklearn.cluster import KMeans
 from anato_unravel import unravel_elems
 
 
-def plot_registration(source, target, transformation, save_path=None, show=False):
+def plot_registration(source_transformed, target, save_path=None, show=False):
     """
     Create a Plotly 3D figure showing source (transformed) and target point clouds,
     optionally save it to file, and return the figure object.
 
     Args:
-        source: open3d.geometry.PointCloud or any object with .points (iterable of 3D points)
-        target: open3d.geometry.PointCloud or any object with .points
-        transformation: 4x4 transformation matrix to apply to source
+        source_transformed: array-like, transformed source point cloud.
+        target: array-like, target point cloud.
         save_path: optional path to save the figure.
         show: whether to call fig.show()
 
     Returns:
         fig: plotly.graph_objects.Figure
     """
-    # copy and transform source so we don't mutate inputs
-    src_temp = copy.deepcopy(source)
-    tgt_temp = copy.deepcopy(target)
-
-    src_temp.transform(transformation)
-    src_pts = np.asarray(src_temp.points)
-    tgt_pts = np.asarray(tgt_temp.points)
-
     # build Plotly figure
     fig = go.Figure()
     fig.add_trace(
         go.Scatter3d(
-            x=tgt_pts[:, 0],
-            y=tgt_pts[:, 1],
-            z=tgt_pts[:, 2],
+            x=target[:, 0],
+            y=target[:, 1],
+            z=target[:, 2],
             mode="markers",
             marker=dict(size=2, color="#00A6EE", opacity=0.7),
             name="Target (final)",
@@ -53,9 +44,9 @@ def plot_registration(source, target, transformation, save_path=None, show=False
     )
     fig.add_trace(
         go.Scatter3d(
-            x=src_pts[:, 0],
-            y=src_pts[:, 1],
-            z=src_pts[:, 2],
+            x=source_transformed[:, 0],
+            y=source_transformed[:, 1],
+            z=source_transformed[:, 2],
             mode="markers",
             marker=dict(size=2, color="#FFB400", opacity=0.7),
             name="Source (transformed)",
@@ -375,9 +366,8 @@ def growth_mapping(
     if plot_figures:
         assert dir_path is not None, "dir_path must be provided to save figures"
         fig = plot_registration(
-            initial_pcd,
-            final_pcd,
-            icp_result.transformation,
+            np.asarray(initial_translated_mesh.triangles_center),
+            np.asarray(final_mesh.triangles_center),
             save_path=(os.path.join(dir_path, "rigid_registration.html")),
         )
 
@@ -418,6 +408,12 @@ def growth_mapping(
             dir_path=dir_path,
             parallel=parallel,
         )
+        if plot_figures:
+            fig = plot_registration(
+                aligned_source_triangles_center,
+                np.asarray(final_mesh.triangles_center),
+                save_path=(os.path.join(dir_path, "deformable_registration.html")),
+            )
     else:
         aligned_source_triangles_center = initial_translated_mesh.triangles_center
 
