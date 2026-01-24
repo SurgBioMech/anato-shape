@@ -27,6 +27,7 @@ def transform_points_via_correspondence(
     source_coords: np.ndarray,
     target_coords: np.ndarray,
     smoothing: float = 0.0,
+    max_control_points: int = 1000,
 ) -> np.ndarray:
     """
     Transform points from source space to target space using RBF interpolation.
@@ -34,16 +35,40 @@ def transform_points_via_correspondence(
     Given a correspondence between source_coords and target_coords (same number of points),
     this function learns a smooth mapping and applies it to transform arbitrary points.
 
+    Performance: For large meshes (>1000 points), automatically subsamples control points
+    to improve speed. RBF interpolation is O(N³) in the number of control points.
+
     Args:
         points: (N, 3) array of points to transform.
         source_coords: (M, 3) array of original/source coordinates.
         target_coords: (M, 3) array of corresponding transformed/target coordinates.
         smoothing: RBF smoothing parameter (0 = exact interpolation).
+        max_control_points: Maximum control points for RBF (default 1000).
+                           If source_coords has more points, it will be subsampled.
 
     Returns:
         (N, 3) array of transformed points.
     """
-    interpolator = RBFInterpolator(source_coords, target_coords, smoothing=smoothing)
+    # Subsample if we have too many control points
+    n_source = source_coords.shape[0]
+    if n_source > max_control_points:
+        # Random subsample for speed
+        indices = np.random.choice(n_source, max_control_points, replace=False)
+        source_subset = source_coords[indices]
+        target_subset = target_coords[indices]
+        print(
+            f"RBF: Subsampling {n_source} -> {max_control_points} control points for speed"
+        )
+    else:
+        source_subset = source_coords
+        target_subset = target_coords
+
+    interpolator = RBFInterpolator(
+        source_subset,
+        target_subset,
+        smoothing=smoothing,
+        kernel="thin_plate_spline",  # Often faster than default 'multiquadric'
+    )
     return interpolator(points)
 
 
