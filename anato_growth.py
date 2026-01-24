@@ -1,5 +1,6 @@
 import copy
 import os
+import shutil
 from functools import partial
 from typing import Optional
 
@@ -11,9 +12,108 @@ import plotly.graph_objects as go
 import trimesh
 from IPython.display import display
 from pycpd import DeformableRegistration
+from scipy.interpolate import RBFInterpolator
 from sklearn.cluster import KMeans
-
+import time
+import json
 from anato_unravel import unravel_elems
+
+
+PLOT_UNRAVEL_SLICE_FIGS = False  # Used for debugging unraveling process
+
+
+def transform_points_via_correspondence(
+    points: np.ndarray,
+    source_coords: np.ndarray,
+    target_coords: np.ndarray,
+    smoothing: float = 0.0,
+) -> np.ndarray:
+    """
+    Transform points from source space to target space using RBF interpolation.
+
+    Given a correspondence between source_coords and target_coords (same number of points),
+    this function learns a smooth mapping and applies it to transform arbitrary points.
+
+    Args:
+        points: (N, 3) array of points to transform.
+        source_coords: (M, 3) array of original/source coordinates.
+        target_coords: (M, 3) array of corresponding transformed/target coordinates.
+        smoothing: RBF smoothing parameter (0 = exact interpolation).
+
+    Returns:
+        (N, 3) array of transformed points.
+    """
+    interpolator = RBFInterpolator(source_coords, target_coords, smoothing=smoothing)
+    return interpolator(points)
+
+
+def fit_corresponding_kmeans(
+    n_clusters: int,
+    initial_coords: np.ndarray,
+    aligned_coords: np.ndarray,
+    final_coords: np.ndarray,
+    init_centers: Optional[np.ndarray] = None,
+    initial_max_iter: int = 300,
+    final_max_iter: int = 5,
+):
+    """
+    Fit K-means on initial mesh and a corresponding K-means on final mesh.
+
+    The initial K-means cluster centers are transformed via RBF interpolation
+    (using the correspondence between initial_coords and aligned_coords) to
+    initialize the final K-means. This ensures cluster correspondence between
+    the two meshes.
+
+    Args:
+        n_clusters: Number of clusters.
+        initial_coords: (N, 3) coordinates of the original initial mesh.
+        aligned_coords: (N, 3) coordinates after registration (same point order).
+        final_coords: (M, 3) coordinates of the final mesh.
+        init_centers: Optional (n_clusters, 3) array to seed initial K-means.
+                      If None, uses random k-means++ initialization.
+        initial_max_iter: Max iterations for initial K-means (use 1 to preserve seeding).
+        final_max_iter: Max iterations for final K-means.
+
+    Returns:
+        (initial_kms, final_kms): Fitted KMeans objects for initial and final meshes.
+    """
+    # Fit K-means on ORIGINAL initial mesh coordinates
+    if init_centers is not None:
+        initial_kms = KMeans(
+            n_clusters=n_clusters,
+            init=init_centers,
+            n_init=1,  # Required when using custom init
+            max_iter=initial_max_iter,
+        ).fit(initial_coords)
+    else:
+        initial_kms = KMeans(n_clusters=n_clusters).fit(initial_coords)
+
+    # Transform cluster centers from initial space to aligned/final space
+    transformed_centers = transform_points_via_correspondence(
+        initial_kms.cluster_centers_,
+        initial_coords,
+        aligned_coords,
+    )
+
+    # Fit final K-means seeded with transformed centers
+    final_kms = KMeans(
+        n_clusters=n_clusters,
+        init=transformed_centers,
+        n_init=1,  # Required when using custom init
+        max_iter=final_max_iter,
+    ).fit(final_coords)
+
+    return initial_kms, final_kms
+
+
+def generate_random_colors(n, seed=42):
+    """Generates N distinct random RGB color strings."""
+    np.random.seed(seed)
+    colors = []
+    for _ in range(n):
+        r, g, b = np.random.randint(0, 255, 3)
+        colors.append(f"rgb({r},{g},{b})")
+    return np.array(colors)
 
 
 def reassign_per_face_intgaussian(mesh, manifold_data):
@@ -38,67 +138,127 @@ def reassign_per_face_intgaussian(mesh, manifold_data):
 
 def plot_mesh_patch_values(
     mesh: trimesh.Trimesh,
-    patch_values: np.ndarray,
-    patch_labels: Optional[np.ndarray] = None,
+    patch_labels: np.ndarray,
+    patch_values: Optional[np.ndarray] = None,
     title: str = "",
     save_path: Optional[str] = None,
+    discrete: bool = False,
+    colormap: Optional[np.ndarray] = None,
 ):
     """
-    Plot a mesh colored by per-patch scalar values
+    Plot a mesh colored by patch data.
+
     Args:
-        mesh: trimesh.Trimesh
-        patch_values: numpy array of length n_patches
-        patch_labels: patch_labels maps each face -> patch index (len = n_faces).
-        title: plot title (if patch_labels was passed positionally as string, that will be used as title)
-        save_path: optional path to save HTML
+        mesh: trimesh.Trimesh object.
+        patch_labels: Array of shape (n_faces,) mapping each Face -> Patch Index/ID.
+        patch_values: Optional array mapping Patch Index -> Value.
+                      - If None and discrete=True, 'patch_labels' are used as the values (coloring by ID).
+                      - If provided, we map patch_values[patch_labels] to get per-face data.
+        title: Plot title.
+        save_path: Optional path to save HTML.
+        discrete: If True, uses flat coloring (no interpolation).
+                  If False, calculates vertex averages for a smooth heatmap (requires patch_values).
+        colormap: Array of color strings. If None, random colors are generated.
     """
     verts = np.asarray(mesh.vertices)
     faces = np.asarray(mesh.faces)
-    n_faces = faces.shape[0]
 
-    pv = np.asarray(patch_values).ravel()
-
+    # 1. Standardize Inputs
     patch_labels = np.asarray(patch_labels).ravel()
-    if patch_labels.size != n_faces:
+    if patch_labels.size != faces.shape[0]:
         raise ValueError(
-            f"patch_labels length ({patch_labels.size}) must equal number of faces ({n_faces})."
+            f"patch_labels length ({patch_labels.size}) must match face count ({faces.shape[0]})."
         )
-    # pv is per-patch: map to faces
-    face_values = pv[patch_labels]
 
-    # Build per-vertex values by averaging adjacent face values
-    n_verts = verts.shape[0]
-    vertex_accum = np.zeros(n_verts, dtype=np.float64)
-    vertex_counts = np.zeros(n_verts, dtype=np.int32)
+    # 2. Determine Data Per Face
+    if patch_values is not None:
+        # Map: Face -> Patch Index -> Value
+        pv = np.asarray(patch_values).ravel()
+        face_data = pv[patch_labels]
+    else:
+        # Fallback: Face -> Patch Index (Use the label itself as the value)
+        if not discrete:
+            raise ValueError(
+                "patch_values is required for continuous (smooth) heatmaps."
+            )
+        face_data = patch_labels
 
-    for f_idx, (i, j, k) in enumerate(faces):
-        v = float(face_values[f_idx])
-        vertex_accum[i] += v
-        vertex_accum[j] += v
-        vertex_accum[k] += v
-        vertex_counts[i] += 1
-        vertex_counts[j] += 1
-        vertex_counts[k] += 1
+    # 3. Create Trace based on Mode
+    if discrete:
+        # --- Discrete Mode (Flat Coloring by ID) ---
+        face_ids = face_data.astype(int)
 
-    # avoid division by zero
-    vertex_counts = np.where(vertex_counts == 0, 1, vertex_counts)
-    vertex_values = vertex_accum / vertex_counts
+        # Handle Colormap
+        if colormap is None:
+            # We need enough colors for the maximum ID found
+            n_colors = int(face_ids.max()) + 1
+            # Simple random RGB generator if helper not available
+            colormap = np.array(
+                [
+                    f"rgb({np.random.randint(0,255)},{np.random.randint(0,255)},{np.random.randint(0,255)})"
+                    for _ in range(n_colors)
+                ]
+            )
 
-    mesh3d = go.Mesh3d(
-        x=verts[:, 0],
-        y=verts[:, 1],
-        z=verts[:, 2],
-        i=faces[:, 0],
-        j=faces[:, 1],
-        k=faces[:, 2],
-        intensity=vertex_values,
-        colorscale="Viridis",
-        showscale=True,
-        colorbar=dict(title=title or "Value"),
-        flatshading=False,
-        opacity=1.0,
-    )
+        # Safety check for colormap size
+        if len(colormap) <= face_ids.max():
+            # Extend colormap randomly if it's too short
+            extra_needed = int(face_ids.max()) - len(colormap) + 1
+            extra_colors = [
+                f"rgb({np.random.randint(0,255)},{np.random.randint(0,255)},{np.random.randint(0,255)})"
+                for _ in range(extra_needed)
+            ]
+            colormap = np.concatenate([colormap, extra_colors])
 
+        face_colors = colormap[face_ids]
+
+        mesh3d = go.Mesh3d(
+            x=verts[:, 0],
+            y=verts[:, 1],
+            z=verts[:, 2],
+            i=faces[:, 0],
+            j=faces[:, 1],
+            k=faces[:, 2],
+            facecolor=face_colors,
+            flatshading=True,
+            name=title,
+        )
+
+    else:
+        # --- Continuous Mode (Smooth Heatmap) ---
+        # Interpolate face values to vertices for smooth gradients
+        n_verts = verts.shape[0]
+        vertex_accum = np.zeros(n_verts, dtype=np.float64)
+        vertex_counts = np.zeros(n_verts, dtype=np.int32)
+
+        # Vectorized accumulation is hard with numpy alone, using simple loop for clarity/safety
+        # (Or use scipy.sparse for speed if meshes are huge, but loop is fine for plotting)
+        for f_idx, (i, j, k) in enumerate(faces):
+            val = face_data[f_idx]
+            vertex_accum[[i, j, k]] += val
+            vertex_counts[[i, j, k]] += 1
+
+        # Avoid division by zero
+        vertex_counts[vertex_counts == 0] = 1
+        vertex_values = vertex_accum / vertex_counts
+
+        mesh3d = go.Mesh3d(
+            x=verts[:, 0],
+            y=verts[:, 1],
+            z=verts[:, 2],
+            i=faces[:, 0],
+            j=faces[:, 1],
+            k=faces[:, 2],
+            intensity=vertex_values,
+            colorscale="Viridis",
+            showscale=True,
+            colorbar=dict(title=title or "Value"),
+            flatshading=False,
+            opacity=1.0,
+            name=title,
+        )
+
+    # 4. Finalize Layout
     fig = go.Figure(data=[mesh3d])
     fig.update_layout(
         title=title,
@@ -107,8 +267,10 @@ def plot_mesh_patch_values(
         height=700,
         margin=dict(l=0, r=0, b=0, t=40),
     )
+
     if save_path:
         fig.write_html(save_path)
+
     return fig
 
 
@@ -166,6 +328,55 @@ def plot_registration(source_transformed, target, save_path=None, show=False):
     return fig
 
 
+def perform_rigid_registration(
+    initial_mesh, final_mesh, mesh_m, plot_figures=False, dir_path=None
+):
+    """
+    Perform rigid registration of initial_mesh onto final_mesh using ICP.
+    Args:
+        initial_mesh: trimesh.Trimesh
+        final_mesh: trimesh.Trimesh
+        mesh_m: mesh parameter (for figure naming)
+        plot_figures: whether to plot registration result
+        dir_path: directory path to save figures (if plot_figures is True)
+    Returns the transformed initial_mesh.
+    """
+    print(f"mesh_m = {mesh_m}, performing rigid registration")
+    initial_pcd = o3d.geometry.PointCloud()
+    final_pcd = o3d.geometry.PointCloud()
+
+    iv_cpy = initial_mesh.vertices.copy().astype(np.float64)
+    fv_cpy = final_mesh.vertices.copy().astype(np.float64)
+    initial_pcd.points = o3d.utility.Vector3dVector(iv_cpy)
+    final_pcd.points = o3d.utility.Vector3dVector(fv_cpy)
+
+    ivn_cpy = initial_mesh.vertex_normals.copy().astype(np.float64)
+    fvn_cpy = final_mesh.vertex_normals.copy().astype(np.float64)
+
+    initial_pcd.normals = o3d.utility.Vector3dVector(ivn_cpy)
+    final_pcd.normals = o3d.utility.Vector3dVector(fvn_cpy)
+
+    translation_matrix = calculate_translation_matrix(initial_pcd, final_pcd)
+    icp_result = o3d.pipelines.registration.registration_icp(
+        source=initial_pcd,
+        target=final_pcd,
+        max_correspondence_distance=1,
+        init=translation_matrix,
+    )
+
+    initial_translated_mesh = copy.deepcopy(initial_mesh)
+    initial_translated_mesh.apply_transform(icp_result.transformation)
+
+    if plot_figures:
+        assert dir_path is not None, "dir_path must be provided to save figures"
+        fig = plot_registration(
+            np.asarray(initial_translated_mesh.triangles_center),
+            np.asarray(final_mesh.triangles_center),
+            save_path=(os.path.join(dir_path, f"rigid_registration_{mesh_m}.html")),
+        )
+    return initial_translated_mesh
+
+
 def calculate_translation_matrix(pcd_source, pcd_target):
     """
     Calculates the translation transformation matrix to move the center of mass
@@ -193,12 +404,29 @@ def calculate_translation_matrix(pcd_source, pcd_target):
 
 
 def save_segment_registration(
-    iteration, error, X, Y, dir_path=None, max_iterations=None, division=None
+    iteration,
+    error,
+    X,
+    Y,
+    dir_path=None,
+    max_iterations=None,
+    division=None,
+    plot_figures=False,
 ):
     """
     Saves a snapshot of the registration process to disk.
+
+    Args:
+        dir_path: Direct directory path where figures will be saved.
     """
     if iteration % 5 != 0 and iteration != max_iterations - 1:
+        return
+
+    filename = os.path.join(dir_path, f"div{division}_iter_{iteration:04d}.html")
+    if os.path.exists(filename):
+        return  # already saved
+
+    if not plot_figures:
         return
 
     # Ensure arrays are numpy arrays
@@ -241,10 +469,7 @@ def save_segment_registration(
         margin=dict(l=0, r=0, b=0, t=40),
     )
 
-    os.makedirs(os.path.join(dir_path, "segment_alignment_figs"), exist_ok=True)
-    filename = os.path.join(
-        dir_path, "segment_alignment_figs", f"div{division}_iter_{iteration:04d}.html"
-    )
+    os.makedirs(dir_path, exist_ok=True)
     fig.write_html(filename)
 
 
@@ -279,15 +504,12 @@ def align_segment(args):
         max_iterations=max_iterations,
     )
 
-    callback = (
-        partial(
-            save_segment_registration,
-            dir_path=dir_path,
-            max_iterations=max_iterations,
-            division=i,
-        )
-        if plot_figures
-        else None
+    callback = partial(
+        save_segment_registration,
+        dir_path=dir_path,
+        max_iterations=max_iterations,
+        division=i,
+        plot_figures=plot_figures,
     )
 
     TY, _ = deform_reg.register(callback)
@@ -397,11 +619,11 @@ def segment_registration(
 
 
 def growth_mapping(
-    initial_mesh: trimesh.Trimesh,
-    final_mesh: trimesh.Trimesh,
-    initial_manifold_data: dict,
-    final_manifold_data: dict,
-    ncluster: int,
+    initial_meshes: dict,
+    final_meshes: dict,
+    initial_manifold_datas: dict,
+    final_manifold_datas: dict,
+    ncluster_input: int,
     plot_figures: bool = False,
     dir_path: Optional[str] = None,
     parallel: bool = False,
@@ -421,6 +643,13 @@ def growth_mapping(
     final mesh, meaning that it finds a per-element growth rate that
     characterizes the geometric change between the two geometries.
 
+    - If `ncluster_input` is None, clustering is "pegged" to the intrinsic patch count
+      defined in `initial_manifold_datas` for each curvature scale (Dynamic Mode).
+
+    - Results are saved to a CSV file, and a `growth_metadata.json` registry is
+      updated. This registry contains an `n_clusters` field (int or "dynamic") to
+      allow reliable lookup of the correct results file for any configuration.
+
     Steps:
         1. Rotate/transform initial geometry onto final geometry
         2. (optional) Unravel initial/final geometries and perform secondary
@@ -431,12 +660,11 @@ def growth_mapping(
         5. Calculate growth rate per cluster.
 
     Parameters:
-        initial_mesh (trimesh.Trimesh): The initial mesh.
-        final_mesh (trimesh.Trimesh): The final mesh.
-        initial_manifold_data (dict): Manifold data for the initial mesh.
-        final_manifold_data (dict): Manifold data for the final mesh.
+        initial_meshes (dict[trimesh.Trimesh]): A dictionary mapping mesh parameters to the initial meshes.
+        final_meshes (dict[trimesh.Trimesh]): A dictionary mapping mesh parameters to the final meshes.
+        initial_manifold_datas (dict): Manifold data for the initial meshes.
+        final_manifold_datas (dict): Manifold data for the final meshes.
         ncluster (int): Number of clusters for k-means.
-        dir_path (str, optional): Directory path to save intermediate results. If None, no files are saved.
         plot_figures (bool): Whether to plot figures during processing. If True, set dir_path to true
         dir_path (str, optional): Directory path to save results and figures (if plotting).
         parallel (bool): Whether to use parallel processing for segment registration.
@@ -450,235 +678,395 @@ def growth_mapping(
             cline_initial_div (np.ndarray): Centerline derivatives for initial mesh.
             cline_final_pos (np.ndarray): Centerline positions for final mesh.
             cline_final_div (np.ndarray): Centerline derivatives for final mesh.
-    Returns:
-        area_changes (np.ndarray): Array of area changes per cluster.
-        intgaussian_changes (np.ndarray): Array of integrated Gaussian curvature changes per cluster.
-        initial_kms (KMeans): KMeans object for initial mesh clustering.
-        final_kms (KMeans): KMeans object for final mesh clustering.
     """
-    print("Performing rigid registration")
-    initial_pcd = o3d.geometry.PointCloud()
-    final_pcd = o3d.geometry.PointCloud()
+    assert set(initial_meshes.keys()) == set(
+        final_meshes.keys()
+    ), "Initial and final mesh keys must match."
 
-    iv_cpy = initial_mesh.vertices.copy().astype(np.float64)
-    fv_cpy = final_mesh.vertices.copy().astype(np.float64)
-    initial_pcd.points = o3d.utility.Vector3dVector(iv_cpy)
-    final_pcd.points = o3d.utility.Vector3dVector(fv_cpy)
+    assert set(initial_manifold_datas.keys()) == set(
+        final_manifold_datas.keys()
+    ), "Initial and final manifold data keys must match."
 
-    ivn_cpy = initial_mesh.vertex_normals.copy().astype(np.float64)
-    fvn_cpy = final_mesh.vertex_normals.copy().astype(np.float64)
+    mesh_ms = list(initial_manifold_datas.keys())
+    curv_ms = list(set(initial_manifold_datas[mesh_ms[0]].keys()).difference({"name"}))
 
-    initial_pcd.normals = o3d.utility.Vector3dVector(ivn_cpy)
-    final_pcd.normals = o3d.utility.Vector3dVector(fvn_cpy)
+    growth_data = {}
+    for mesh_m in initial_meshes.keys():
+        growth_data[mesh_m] = {}
+        initial_mesh = initial_meshes[mesh_m]
+        final_mesh = final_meshes[mesh_m]
+        initial_manifold_data = initial_manifold_datas[mesh_m]
+        final_manifold_data = final_manifold_datas[mesh_m]
 
-    translation_matrix = calculate_translation_matrix(initial_pcd, final_pcd)
-    icp_result = o3d.pipelines.registration.registration_icp(
-        source=initial_pcd,
-        target=final_pcd,
-        max_correspondence_distance=1,
-        init=translation_matrix,
-    )
-
-    initial_translated_mesh = copy.deepcopy(initial_mesh)
-    initial_translated_mesh.apply_transform(icp_result.transformation)
-
-    if plot_figures:
-        assert dir_path is not None, "dir_path must be provided to save figures"
-        fig = plot_registration(
-            np.asarray(initial_translated_mesh.triangles_center),
-            np.asarray(final_mesh.triangles_center),
-            save_path=(os.path.join(dir_path, "rigid_registration.html")),
+        initial_translated_mesh = perform_rigid_registration(
+            initial_mesh, final_mesh, mesh_m, plot_figures, dir_path
         )
 
-    if unravel:
-        # Perform unraveling
-        initial_unraveled_grps = unravel_elems(
-            initial_manifold_data["name"],
-            initial_mesh,
-            cline_initial_pos,
-            cline_initial_div,
-            m=mdiv,
-            n=1,
-            plot_figures=plot_figures,
-            dir_path=dir_path,
-        )
-        final_unraveled_grps = unravel_elems(
-            final_manifold_data["name"],
-            final_mesh,
-            cline_final_pos,
-            cline_final_div,
-            m=mdiv,
-            n=1,
-            plot_figures=plot_figures,
-            dir_path=dir_path,
-        )
-
-        print(f"Performing deformable registration of {mdiv} segments")
-        aligned_source_triangles_center = segment_registration(
-            initial_translated_mesh,
-            final_mesh,
-            initial_unraveled_grps,
-            final_unraveled_grps,
-            n_segments=mdiv,
-            alpha=1,
-            beta=10,
-            max_iterations=30,
-            plot_figures=plot_figures,
-            dir_path=dir_path,
-            parallel=parallel,
-        )
-        if plot_figures:
-            fig = plot_registration(
-                aligned_source_triangles_center,
-                np.asarray(final_mesh.triangles_center),
-                save_path=(os.path.join(dir_path, "deformable_registration.html")),
-            )
-    else:
-        aligned_source_triangles_center = initial_translated_mesh.triangles_center
-
-    initial_kms = KMeans(ncluster).fit(aligned_source_triangles_center)
-    final_kms = KMeans(ncluster, init=initial_kms.cluster_centers_, max_iter=5).fit(
-        final_mesh.triangles_center
-    )
-
-    initial_mesh.intgaussian_faces = reassign_per_face_intgaussian(
-        initial_mesh, initial_manifold_data
-    )
-    final_mesh.intgaussian_faces = reassign_per_face_intgaussian(
-        final_mesh, final_manifold_data
-    )
-
-    # Ensure labels cover all clusters
-    assert set(initial_kms.labels_) == set(
-        range(ncluster)
-    ), "Initial clustering has empty clusters!"
-    assert set(final_kms.labels_) == set(
-        range(ncluster)
-    ), "Final clustering has empty clusters!"
-
-    # Compute sums per cluster
-    initial_Ks = np.bincount(
-        initial_kms.labels_, weights=initial_mesh.intgaussian_faces, minlength=ncluster
-    )
-    final_Ks = np.bincount(
-        final_kms.labels_, weights=final_mesh.intgaussian_faces, minlength=ncluster
-    )
-
-    initial_As = np.bincount(
-        initial_kms.labels_, weights=initial_mesh.area_faces, minlength=ncluster
-    )
-    final_As = np.bincount(
-        final_kms.labels_, weights=final_mesh.area_faces, minlength=ncluster
-    )
-
-    # Ensure curvatures sum correctly
-    assert np.isclose(
-        initial_Ks.sum(),
-        initial_manifold_data["patch_data"]["IntGaussian"].sum(),
-    ), "Initial integrated Gaussian curvature mismatch"
-    assert np.isclose(
-        final_Ks.sum(),
-        final_manifold_data["patch_data"]["IntGaussian"].sum(),
-    ), "Final integrated Gaussian curvature mismatch"
-
-    if plot_figures:
-        # Plot initial/final integrated Gaussian per cluster
-        # using (curvature calculation vs. growth mapping patches)
-        os.makedirs(os.path.join(dir_path, "heatmap_figs"), exist_ok=True)
-
-        # Compute area changes per cluster
-        area_changes = (np.sqrt(final_As) - np.sqrt(initial_As)) / np.sqrt(initial_As)
-        intgaussian_changes = final_Ks - initial_Ks
-
-        growth_values = {}
-        growth_values["initial"] = {"Patch_Area": initial_As, "IntGaussian": initial_Ks}
-        growth_values["final"] = {"Patch_Area": final_As, "IntGaussian": final_Ks}
-        growth_changes = {
-            "Patch_Area": area_changes,
-            "IntGaussian": intgaussian_changes,
-        }
-        for value in ("Patch_Area", "IntGaussian"):
-            plot_mesh_patch_values(
+        if unravel:
+            # Perform unraveling
+            initial_unraveled_grps = unravel_elems(
+                initial_manifold_data["name"],
                 initial_mesh,
-                initial_manifold_data["patch_data"][value].values,
-                initial_manifold_data["patch_labels"],
-                f"Initial mesh — {value}",
-                save_path=os.path.join(
-                    dir_path,
-                    "heatmap_figs",
-                    f"initial_{value.lower()}_curv_patches.html",
-                ),
+                cline_initial_pos,
+                cline_initial_div,
+                m=mdiv,
+                n=1,
+                plot_unravel_figs=PLOT_UNRAVEL_SLICE_FIGS,
+                plot_unravel_groups_figs=plot_figures,
+                dir_path=dir_path,
             )
-
-            plot_mesh_patch_values(
+            final_unraveled_grps = unravel_elems(
+                final_manifold_data["name"],
                 final_mesh,
-                final_manifold_data["patch_data"][value].values,
-                final_manifold_data["patch_labels"],
-                f"Final mesh — {value}",
-                save_path=os.path.join(
-                    dir_path, "heatmap_figs", f"final_{value.lower()}_curv_patches.html"
-                ),
+                cline_final_pos,
+                cline_final_div,
+                m=mdiv,
+                n=1,
+                plot_unravel_figs=PLOT_UNRAVEL_SLICE_FIGS,
+                plot_unravel_groups_figs=plot_figures,
+                dir_path=dir_path,
             )
 
-            plot_mesh_patch_values(
-                initial_mesh,
-                growth_values["initial"][value],
+            print(
+                f"mesh_m = {mesh_m}, performing deformable registration of {mdiv} segments"
+            )
+            segment_fig_dir = os.path.join(
+                dir_path, "segment_alignment_figs", f"mesh_{mesh_m}"
+            )
+            aligned_source_triangles_center = segment_registration(
+                initial_translated_mesh,
+                final_mesh,
+                initial_unraveled_grps,
+                final_unraveled_grps,
+                n_segments=mdiv,
+                alpha=1,
+                beta=10,
+                max_iterations=30,
+                plot_figures=plot_figures,
+                dir_path=segment_fig_dir,
+                parallel=parallel,
+            )
+            if plot_figures:
+                fig = plot_registration(
+                    aligned_source_triangles_center,
+                    np.asarray(final_mesh.triangles_center),
+                    save_path=(
+                        os.path.join(dir_path, f"deformable_registration_{mesh_m}.html")
+                    ),
+                )
+        else:
+            aligned_source_triangles_center = initial_translated_mesh.triangles_center
+
+        initial_As = None
+        final_As = None
+        initial_kms = None
+        final_kms = None
+
+        # ─────────────────────────────────────────────────────────────────────
+        # Static mode: K-means with random initialization, run once per mesh_m.
+        # Clusters are shared across all curv_m values since n_clusters is fixed.
+        # ─────────────────────────────────────────────────────────────────────
+        if ncluster_input:
+            ncluster_label = str(ncluster_input)
+            ncluster = ncluster_input
+            print(f"Calculating mapping with static ncluster = {ncluster}")
+
+            initial_kms, final_kms = fit_corresponding_kmeans(
+                n_clusters=ncluster,
+                initial_coords=initial_mesh.triangles_center,
+                aligned_coords=aligned_source_triangles_center,
+                final_coords=final_mesh.triangles_center,
+                init_centers=None,  # Random k-means++ initialization
+            )
+
+            # Ensure labels cover all clusters
+            assert set(initial_kms.labels_) == set(
+                range(ncluster)
+            ), "Initial clustering has empty clusters!"
+            assert set(final_kms.labels_) == set(
+                range(ncluster)
+            ), "Final clustering has empty clusters!"
+
+            # Compute area sums per cluster
+            initial_As = np.bincount(
+                initial_kms.labels_, weights=initial_mesh.area_faces, minlength=ncluster
+            )
+            final_As = np.bincount(
+                final_kms.labels_, weights=final_mesh.area_faces, minlength=ncluster
+            )
+            if dir_path:
+                print(f"Saving k-means cluster info for mesh_m={mesh_m} to {dir_path}")
+                np.savez(
+                    os.path.join(
+                        dir_path,
+                        f"kmeans_clusters_{mesh_m}_{ncluster}.npz",
+                    ),
+                    initial_centers=initial_kms.cluster_centers_,
+                    final_centers=final_kms.cluster_centers_,
+                    initial_labels=initial_kms.labels_,
+                    final_labels=final_kms.labels_,
+                )
+        else:
+            ncluster_label = "dynamic"
+
+        for curv_m in curv_ms:
+            print(f"Processing mesh_m={mesh_m}, curv_m={curv_m}...")
+
+            initial_mesh.intgaussian_faces = reassign_per_face_intgaussian(
+                initial_mesh, initial_manifold_data[curv_m]
+            )
+            final_mesh.intgaussian_faces = reassign_per_face_intgaussian(
+                final_mesh, final_manifold_data[curv_m]
+            )
+
+            # ─────────────────────────────────────────────────────────────────
+            # Dynamic mode: K-means seeded from curvature patch centroids.
+            # n_clusters varies per curv_m based on patch count, so K-means
+            # must run inside the curv_m loop. Uses max_iter=1 to preserve
+            # the patch structure from curvature calculation.
+            # ─────────────────────────────────────────────────────────────────
+            if ncluster_input is None:
+                patch_labels = initial_manifold_data[curv_m]["patch_labels"]
+                current_n_clusters = np.unique(patch_labels).shape[0]
+                print(
+                    f"Calculating mapping with dynamic n_clusters = {current_n_clusters} "
+                    "based on patches from curvature calculation"
+                )
+
+                # Calculate patch centroids in ORIGINAL initial mesh space
+                df_orig = pd.DataFrame(
+                    initial_mesh.triangles_center, columns=["x", "y", "z"]
+                )
+                df_orig["label"] = patch_labels
+                init_centers = df_orig.groupby("label").mean().sort_index().values
+
+                initial_kms, final_kms = fit_corresponding_kmeans(
+                    n_clusters=current_n_clusters,
+                    initial_coords=initial_mesh.triangles_center,
+                    aligned_coords=aligned_source_triangles_center,
+                    final_coords=final_mesh.triangles_center,
+                    init_centers=init_centers,  # Seed from patch centroids
+                    initial_max_iter=1,  # Preserve patch structure
+                )
+
+                # Ensure labels cover all clusters
+                assert set(initial_kms.labels_) == set(
+                    range(current_n_clusters)
+                ), "Initial clustering has empty clusters!"
+                assert set(final_kms.labels_) == set(
+                    range(current_n_clusters)
+                ), "Final clustering has empty clusters!"
+
+                # Compute areas
+                initial_As = np.bincount(
+                    initial_kms.labels_,
+                    weights=initial_mesh.area_faces,
+                    minlength=current_n_clusters,
+                )
+                final_As = np.bincount(
+                    final_kms.labels_,
+                    weights=final_mesh.area_faces,
+                    minlength=current_n_clusters,
+                )
+                if dir_path:
+                    print(
+                        f"Saving k-means cluster info for mesh_m={mesh_m} curv_m={curv_m} to {dir_path}"
+                    )
+                    np.savez(
+                        os.path.join(
+                            dir_path,
+                            f"kmeans_clusters_{mesh_m}_{curv_m}_{current_n_clusters}.npz",
+                        ),
+                        initial_centers=initial_kms.cluster_centers_,
+                        final_centers=final_kms.cluster_centers_,
+                        initial_labels=initial_kms.labels_,
+                        final_labels=final_kms.labels_,
+                    )
+            else:
+                current_n_clusters = ncluster
+
+            # Compute curvature sums per cluster
+            initial_Ks = np.bincount(
                 initial_kms.labels_,
-                f"Initial mesh — Integrated {value}",
-                save_path=os.path.join(
-                    dir_path,
-                    "heatmap_figs",
-                    f"initial_{value.lower()}_growth_patches.html",
-                ),
+                weights=initial_mesh.intgaussian_faces,
+                minlength=current_n_clusters,
+            )
+            final_Ks = np.bincount(
+                final_kms.labels_,
+                weights=final_mesh.intgaussian_faces,
+                minlength=current_n_clusters,
             )
 
-            plot_mesh_patch_values(
-                final_mesh,
-                growth_values["final"][value],
-                final_kms.labels_,
-                f"Final mesh — Integrated {value}",
-                save_path=os.path.join(
-                    dir_path,
-                    "heatmap_figs",
-                    f"final_{value.lower()}_growth_patches.html",
-                ),
-            )
+            # Ensure curvatures sum correctly
+            assert np.isclose(
+                initial_Ks.sum(),
+                initial_manifold_data[curv_m]["patch_data"]["IntGaussian"].sum(),
+            ), "Initial integrated Gaussian curvature mismatch"
+            assert np.isclose(
+                final_Ks.sum(),
+                final_manifold_data[curv_m]["patch_data"]["IntGaussian"].sum(),
+            ), "Final integrated Gaussian curvature mismatch"
 
-            plot_mesh_patch_values(
-                final_mesh,
-                growth_changes[value],
-                final_kms.labels_,
-                f"Change in Integrated {value}",
-                save_path=os.path.join(
+            growth_data[mesh_m][curv_m] = {}
+            growth_data[mesh_m][curv_m]["ncluster"] = current_n_clusters
+            growth_data[mesh_m][curv_m]["initial_As"] = initial_As
+            growth_data[mesh_m][curv_m]["final_As"] = final_As
+            growth_data[mesh_m][curv_m]["initial_Ks"] = initial_Ks
+            growth_data[mesh_m][curv_m]["final_Ks"] = final_Ks
+
+            if plot_figures:
+                # Organize figures by mesh_m/curv_m subdirectories
+                fig_dir = os.path.join(
                     dir_path,
                     "heatmap_figs",
-                    f"change_in_{value.lower()}_growth_patches.html",
-                ),
-            )
+                    f"mesh_{mesh_m}",
+                    f"curv_{curv_m}",
+                    f"{ncluster_label}_clusters",
+                )
+                os.makedirs(fig_dir, exist_ok=True)
+
+                # Plot initial/final cluster IDs
+                colormap = generate_random_colors(current_n_clusters)
+                plot_mesh_patch_values(
+                    mesh=initial_mesh,
+                    patch_labels=initial_kms.labels_,
+                    title=f"Initial KMeans Clusters [M={mesh_m}, C={curv_m}]",
+                    save_path=os.path.join(fig_dir, "initial_clusters.html"),
+                    discrete=True,
+                    colormap=colormap,
+                )
+                plot_mesh_patch_values(
+                    mesh=final_mesh,
+                    patch_labels=final_kms.labels_,
+                    title=f"Final KMeans Clusters [M={mesh_m}, C={curv_m}]",
+                    save_path=os.path.join(fig_dir, "final_clusters.html"),
+                    discrete=True,
+                    colormap=colormap,
+                )
+
+                # Compute changes per cluster
+                area_changes = (np.sqrt(final_As) - np.sqrt(initial_As)) / np.sqrt(
+                    initial_As
+                )
+                intgaussian_changes = final_Ks - initial_Ks
+
+                # Define plot specs: (value_key, short_name)
+                plot_specs = [
+                    ("Patch_Area", "area"),
+                    ("IntGaussian", "intgaussian"),
+                ]
+                for value_key, short_name in plot_specs:
+                    # Curvature-based patches
+                    plot_mesh_patch_values(
+                        mesh=initial_mesh,
+                        patch_labels=initial_manifold_data[curv_m]["patch_labels"],
+                        patch_values=initial_manifold_data[curv_m]["patch_data"][
+                            value_key
+                        ].values,
+                        title=f"Initial {value_key} (Curv Patches)",
+                        save_path=os.path.join(
+                            fig_dir, f"{short_name}_initial_curv_patches.html"
+                        ),
+                    )
+                    plot_mesh_patch_values(
+                        mesh=final_mesh,
+                        patch_labels=final_manifold_data[curv_m]["patch_labels"],
+                        patch_values=final_manifold_data[curv_m]["patch_data"][
+                            value_key
+                        ].values,
+                        title=f"Final {value_key} (Curv Patches)",
+                        save_path=os.path.join(
+                            fig_dir, f"{short_name}_final_curv_patches.html"
+                        ),
+                    )
+
+                    # Growth mapping patches
+                    growth_initial = (
+                        initial_As if value_key == "Patch_Area" else initial_Ks
+                    )
+                    growth_final = final_As if value_key == "Patch_Area" else final_Ks
+                    growth_change = (
+                        area_changes
+                        if value_key == "Patch_Area"
+                        else intgaussian_changes
+                    )
+
+                    plot_mesh_patch_values(
+                        mesh=initial_mesh,
+                        patch_labels=initial_kms.labels_,
+                        patch_values=growth_initial,
+                        title=f"Initial {value_key} (Growth Patches)",
+                        save_path=os.path.join(
+                            fig_dir, f"{short_name}_initial_growth_patches.html"
+                        ),
+                    )
+                    plot_mesh_patch_values(
+                        mesh=final_mesh,
+                        patch_labels=final_kms.labels_,
+                        patch_values=growth_final,
+                        title=f"Final {value_key} (Growth Patches)",
+                        save_path=os.path.join(
+                            fig_dir, f"{short_name}_final_growth_patches.html"
+                        ),
+                    )
+                    plot_mesh_patch_values(
+                        mesh=final_mesh,
+                        patch_labels=final_kms.labels_,
+                        patch_values=growth_change,
+                        title=f"Change in {value_key}",
+                        save_path=os.path.join(
+                            fig_dir, f"{short_name}_change_on_final_growth_patches.html"
+                        ),
+                    )
 
     if dir_path:
-        # Save results to CSV
-        results_df = pd.DataFrame(
-            {
-                "Cluster": np.arange(ncluster),
-                "InitialIntGaussian": initial_Ks,
-                "FinalIntGaussian": final_Ks,
-                "InitialArea": initial_As,
-                "FinalArea": final_As,
-            }
-        )
-        results_csv_path = os.path.join(
-            dir_path, f"growth_mapping_{ncluster}_results.csv"
-        )
+        print(f"Saving growth mapping results to {dir_path}")
+        results_df = pd.DataFrame()
+        for mesh_m in initial_meshes.keys():
+            for curv_m in curv_ms:
+                data = growth_data[mesh_m][curv_m]
+                current_n = data["ncluster"]
+
+                row = pd.DataFrame(
+                    {
+                        "Mesh_M": mesh_m,
+                        "Curv_M": curv_m,
+                        "N_Segments": mdiv if unravel else 0,
+                        "Cluster": np.arange(current_n),
+                        "InitialIntGaussian": data["initial_Ks"],
+                        "FinalIntGaussian": data["final_Ks"],
+                        "InitialArea": data["initial_As"],
+                        "FinalArea": data["final_As"],
+                    }
+                )
+                results_df = pd.concat([results_df, row])
+
+        csv_filename = f"growth_mapping_{ncluster_label}_results.csv"
+
+        results_csv_path = os.path.join(dir_path, csv_filename)
         results_df.to_csv(results_csv_path, index=False)
+        print(f"Saved CSV: {csv_filename}")
 
-        # Save the k-means cluster info
-        np.savez(
-            os.path.join(dir_path, f"kmeans_clusters_{ncluster}.npz"),
-            initial_centers=initial_kms.cluster_centers_,
-            final_centers=final_kms.cluster_centers_,
-            initial_labels=initial_kms.labels_,
-            final_labels=final_kms.labels_,
-        )
+        # Update JSON Registry
+        meta_path = os.path.join(dir_path, "growth_metadata.json")
+        registry = {}
 
-    return area_changes, intgaussian_changes, initial_kms, final_kms
+        # Load existing registry if available
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, "r") as f:
+                    registry = json.load(f)
+            except json.JSONDecodeError:
+                print("Warning: Metadata file corrupted, creating new registry.")
+
+        # Update specific key
+        registry[ncluster_label] = {
+            "csv_file": csv_filename,
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "mode": "dynamic" if ncluster_input is None else "static",
+            "n_clusters": ncluster_label,
+        }
+
+        with open(meta_path, "w") as f:
+            json.dump(registry, f, indent=4)
+        print(f"Updated metadata registry: {ncluster_label} -> {csv_filename}")

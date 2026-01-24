@@ -654,7 +654,15 @@ def plot_unravel_groups(twodvertices, points, cline, grps, mdiv, ndiv, marker_si
 
 
 def unravel_elems(
-    name, mesh, cline, cline1stderiv, m, n, plot_figures=False, dir_path=None
+    name,
+    mesh,
+    cline,
+    cline1stderiv,
+    m,
+    n,
+    plot_unravel_figs=False,
+    plot_unravel_groups_figs=False,
+    dir_path=None,
 ):
     """
     This function projects 3D mesh face centers onto a 2D plane using an unraveling
@@ -678,8 +686,10 @@ def unravel_elems(
         EITHER the number of divisions orthogonal to the centerline direction
         (e.g., m=3) OR an array of divisions specifying the segments by proportion
         of total centerline length (e.g., m=[0, 0.1, 0.3, 1.0]).
-    plot_figures : bool
-        Whether to plot the unraveling results.
+    plot_unravel_figs : bool, optional
+        Whether to generate and save figures for the unraveling process (e.g. slices).
+    plot_unravel_groups_figs : bool, optional
+        Whether to generate and save figures for the unravel groups.
     dir_path : str, optional
         Directory path to save intermediate results. If None, no files are saved.
     Returns
@@ -696,7 +706,7 @@ def unravel_elems(
         mesh.face_normals,
         cline,
         cline1stderiv,
-        plot_figures=plot_figures,
+        plot_figures=plot_unravel_figs,
         dir_path=dir_path,
     )
 
@@ -757,7 +767,7 @@ def unravel_elems(
     if total_count != mesh.faces.shape[0]:
         raise RuntimeError("Error dividing into groups: counts do not match.")
 
-    if plot_figures:
+    if plot_unravel_groups_figs:
         fig = plot_unravel_groups(
             twodvertices, mesh.triangles_center, cline, grps, m_eff, n_eff
         )
