@@ -27,7 +27,7 @@ def transform_points_via_correspondence(
     source_coords: np.ndarray,
     target_coords: np.ndarray,
     smoothing: float = 0.0,
-    max_control_points: int = 1000,
+    max_control_points: Optional[int] = None,
 ) -> np.ndarray:
     """
     Transform points from source space to target space using RBF interpolation.
@@ -35,7 +35,7 @@ def transform_points_via_correspondence(
     Given a correspondence between source_coords and target_coords (same number of points),
     this function learns a smooth mapping and applies it to transform arbitrary points.
 
-    Performance: For large meshes (>1000 points), automatically subsamples control points
+    Performance: For large meshes, automatically subsamples control points
     to improve speed. RBF interpolation is O(N³) in the number of control points.
 
     Args:
@@ -43,12 +43,21 @@ def transform_points_via_correspondence(
         source_coords: (M, 3) array of original/source coordinates.
         target_coords: (M, 3) array of corresponding transformed/target coordinates.
         smoothing: RBF smoothing parameter (0 = exact interpolation).
-        max_control_points: Maximum control points for RBF (default 1000).
-                           If source_coords has more points, it will be subsampled.
+        max_control_points: Maximum control points for RBF. If None, automatically
+                           scales based on the number of points to transform:
+                           max(2000, 3 * n_points) to ensure good coverage.
+                           Set explicitly to control speed/accuracy tradeoff.
 
     Returns:
         (N, 3) array of transformed points.
     """
+    # Determine max_control_points if not specified
+    n_points = points.shape[0]
+    if max_control_points is None:
+        # Scale control points with query points for accuracy
+        # Use at least 2000, or 3x the number of points to transform
+        max_control_points = max(2000, 3 * n_points)
+
     # Subsample if we have too many control points
     n_source = source_coords.shape[0]
     if n_source > max_control_points:
@@ -80,6 +89,7 @@ def fit_corresponding_kmeans(
     init_centers: Optional[np.ndarray] = None,
     initial_max_iter: int = 300,
     final_max_iter: int = 5,
+    max_control_points: Optional[int] = None,
 ):
     """
     Fit K-means on initial mesh and a corresponding K-means on final mesh.
@@ -98,6 +108,9 @@ def fit_corresponding_kmeans(
                       If None, uses random k-means++ initialization.
         initial_max_iter: Max iterations for initial K-means (use 1 to preserve seeding).
         final_max_iter: Max iterations for final K-means.
+        max_control_points: Maximum control points for RBF interpolation when
+                           transforming cluster centers. If None, automatically
+                           scales based on n_clusters (default: max(2000, 3*n_clusters)).
 
     Returns:
         (initial_kms, final_kms): Fitted KMeans objects for initial and final meshes.
@@ -118,6 +131,7 @@ def fit_corresponding_kmeans(
         initial_kms.cluster_centers_,
         initial_coords,
         aligned_coords,
+        max_control_points=max_control_points,
     )
 
     # Fit final K-means seeded with transformed centers
@@ -287,7 +301,12 @@ def plot_mesh_patch_values(
     fig = go.Figure(data=[mesh3d])
     fig.update_layout(
         title=title,
-        scene=dict(xaxis_title="X", yaxis_title="Y", zaxis_title="Z"),
+        scene=dict(
+            xaxis_title="X",
+            yaxis_title="Y",
+            zaxis_title="Z",
+            aspectmode="data",
+        ),
         width=900,
         height=700,
         margin=dict(l=0, r=0, b=0, t=40),
@@ -337,7 +356,12 @@ def plot_registration(source_transformed, target, save_path=None, show=False):
     )
     fig.update_layout(
         title="Registration result",
-        scene=dict(xaxis_title="X", yaxis_title="Y", zaxis_title="Z"),
+        scene=dict(
+            xaxis_title="X",
+            yaxis_title="Y",
+            zaxis_title="Z",
+            aspectmode="data",
+        ),
         width=800,
         height=600,
     )
@@ -488,7 +512,12 @@ def save_segment_registration(
     # Update Layout
     fig.update_layout(
         title=f"Division {division+1} — Iter {iteration} (Error: {error:.4f})",
-        scene=dict(xaxis_title="X", yaxis_title="Y", zaxis_title="Z"),
+        scene=dict(
+            xaxis_title="X",
+            yaxis_title="Y",
+            zaxis_title="Z",
+            aspectmode="data",
+        ),
         width=800,
         height=600,
         margin=dict(l=0, r=0, b=0, t=40),
@@ -802,6 +831,7 @@ def growth_mapping(
                 aligned_coords=aligned_source_triangles_center,
                 final_coords=final_mesh.triangles_center,
                 init_centers=None,  # Random k-means++ initialization
+                max_control_points=None,  # Default scaling based on n_clusters
             )
 
             # Ensure labels cover all clusters
@@ -872,6 +902,7 @@ def growth_mapping(
                     final_coords=final_mesh.triangles_center,
                     init_centers=init_centers,  # Seed from patch centroids
                     initial_max_iter=1,  # Preserve patch structure
+                    max_control_points=None,  # Default scaling based on n_clusters
                 )
 
                 # Ensure labels cover all clusters

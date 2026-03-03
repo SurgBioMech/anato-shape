@@ -63,7 +63,8 @@ def mesh_plot(mesh, mesh_color='lightblue', mesh_opacity=0.7, grid_color='black'
             zaxis=dict(nticks=10, backgroundcolor='white', gridcolor='white'),
             camera=dict(
                 eye=dict(x=2, y=-1.5, z=1)
-            )
+            ),
+            aspectmode='data'
         ),
         height=1000,
         width=1000,
@@ -137,7 +138,8 @@ def patch_plot(mesh, manifold_df, cluster_ids, var, scan_name, color_scale='Plas
             zaxis=dict(nticks=10, backgroundcolor='white', gridcolor='white'),
             camera=dict(
                 eye=dict(x=2, y=-1.5, z=1)
-            )
+            ),
+            aspectmode='data'
         ),
         height=1000,
         width=1000,
