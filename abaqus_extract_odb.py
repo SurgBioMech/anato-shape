@@ -106,6 +106,12 @@ def extract_fields(odb_path, step_name, instance_name, nset_name,
             frame_labels = np.array([v.nodeLabel for v in subset.values])
             frame_data = _get_field_data(subset)
 
+            # Abaqus may return extra entries with nodeLabel=0 for
+            # component/invariant values; keep only real nodes (label >= 1).
+            valid = frame_labels > 0
+            frame_labels = frame_labels[valid]
+            frame_data = frame_data[valid]
+
             sort_idx = np.argsort(frame_labels)
             sorted_labels = frame_labels[sort_idx]
             sorted_data = frame_data[sort_idx]
