@@ -1126,3 +1126,242 @@ def growth_mapping(
         with open(meta_path, "w") as f:
             json.dump(registry, f, indent=4)
         print(f"Updated metadata registry: {ncluster_label} -> {csv_filename}")
+
+
+def parse_inp_growth_rates(inp_path):
+    """Parse growth rates assigned to each solid element from an Abaqus INP file.
+
+    Reads element sets, solid section assignments, and User Material definitions
+    to map each element to its growth rate (7th constant in ``*User Material``).
+
+    Parameters
+    ----------
+    inp_path : str or Path
+        Path to the ``.inp`` file with growth material assignments.
+
+    Returns
+    -------
+    node_coords : ndarray, shape (N, 3)
+    node_ids : ndarray, shape (N,)
+    elem_ids : ndarray, shape (E,)
+    elem_connectivity : ndarray, shape (E, 4)
+        Node IDs (1-based) for each C3D4 tetrahedron.
+    element_growth_rates : ndarray, shape (E,)
+        Growth rate for each element.
+    """
+    import re
+    from pathlib import Path as _Path
+    inp_path = _Path(inp_path)
+    with open(inp_path, "r") as f:
+        lines = [line.rstrip("\n") for line in f]
+
+    # --- Parse nodes ---
+    node_start = None
+    elem_start = None
+    for i, line in enumerate(lines):
+        low = line.strip().lower()
+        if node_start is None and (low == "*node" or low.startswith("*node,")):
+            node_start = i + 1
+        elif elem_start is None and low.startswith("*element,"):
+            elem_start = i + 1
+
+    node_rows = []
+    for i in range(node_start, len(lines)):
+        if lines[i].strip().startswith("*"):
+            break
+        parts = lines[i].split(",")
+        if len(parts) >= 4:
+            node_rows.append([float(p.strip()) for p in parts[:4]])
+    node_arr = np.array(node_rows)
+    node_ids = node_arr[:, 0].astype(int)
+    node_coords = node_arr[:, 1:4]
+
+    # --- Parse elements ---
+    elem_rows = []
+    for i in range(elem_start, len(lines)):
+        if lines[i].strip().startswith("*"):
+            break
+        parts = lines[i].split(",")
+        vals = [int(p.strip()) for p in parts if p.strip()]
+        elem_rows.append(vals)
+    elem_arr = np.array(elem_rows)
+    elem_ids = elem_arr[:, 0]
+    elem_connectivity = elem_arr[:, 1:5]
+
+    # --- Parse element sets (Set-N -> element IDs) ---
+    elsets = {}
+    i = 0
+    while i < len(lines):
+        low = lines[i].strip().lower()
+        if low.startswith("*elset") and "elset=" in low:
+            m = re.search(r"elset\s*=\s*(\S+)", lines[i], re.IGNORECASE)
+            if m:
+                name = m.group(1).rstrip(",")
+                ids = []
+                i += 1
+                while i < len(lines) and not lines[i].strip().startswith("*"):
+                    for p in lines[i].split(","):
+                        p = p.strip()
+                        if p:
+                            ids.append(int(p))
+                    i += 1
+                elsets[name] = ids
+                continue
+        i += 1
+
+    # --- Parse section assignments (elset -> material name) ---
+    elset_to_material = {}
+    for line in lines:
+        if line.strip().lower().startswith("*solid section"):
+            es = re.search(r"elset\s*=\s*(\S+)", line, re.IGNORECASE)
+            mt = re.search(r"material\s*=\s*(\S+)", line, re.IGNORECASE)
+            if es and mt:
+                elset_to_material[es.group(1).rstrip(",")] = mt.group(1).rstrip(",")
+
+    # --- Parse growth rates from User Material (7th constant) ---
+    material_growth = {}
+    i = 0
+    while i < len(lines):
+        low = lines[i].strip().lower()
+        if low.startswith("*material"):
+            m = re.search(r"name\s*=\s*(\S+)", lines[i], re.IGNORECASE)
+            if m:
+                mat_name = m.group(1).rstrip(",")
+                for j in range(i + 1, min(i + 10, len(lines))):
+                    if lines[j].strip().lower().startswith("*user material"):
+                        constants = []
+                        for k in range(j + 1, min(j + 5, len(lines))):
+                            if lines[k].strip().startswith("*"):
+                                break
+                            for p in lines[k].split(","):
+                                p = p.strip()
+                                if p:
+                                    constants.append(float(p))
+                        if len(constants) >= 7:
+                            material_growth[mat_name] = constants[6]
+                        break
+        i += 1
+
+    # --- Map element ID -> growth rate ---
+    elem_id_to_idx = {int(eid): idx for idx, eid in enumerate(elem_ids)}
+    element_growth_rates = np.zeros(len(elem_ids))
+    for elset_name, material_name in elset_to_material.items():
+        if elset_name not in elsets or material_name not in material_growth:
+            continue
+        gr = material_growth[material_name]
+        for eid in elsets[elset_name]:
+            if eid in elem_id_to_idx:
+                element_growth_rates[elem_id_to_idx[eid]] = gr
+
+    return node_coords, node_ids, elem_ids, elem_connectivity, element_growth_rates
+
+
+def visualize_inp_growth(inp_path, output_path=None):
+    """Visualize growth rates from a finalized growth INP file.
+
+    Produces a two-panel interactive HTML figure:
+      - Left: outer surface mesh colored by growth rate
+      - Right: solid mesh element centroids colored by growth rate
+
+    Parameters
+    ----------
+    inp_path : str or Path
+        Path to the growth ``.inp`` file.
+    output_path : str or Path or None
+        Where to save the HTML file. Defaults to ``<inp_stem>_growth_viz.html``
+        next to the INP file.
+
+    Returns
+    -------
+    plotly.graph_objects.Figure
+    """
+    from pathlib import Path as _Path
+    from plotly.subplots import make_subplots
+    from scipy.spatial import cKDTree
+    from anato_odb import parse_inp_surface
+
+    inp_path = _Path(inp_path)
+    if output_path is None:
+        output_path = inp_path.parent / f"{inp_path.stem}_growth_viz.html"
+    output_path = _Path(output_path)
+
+    node_coords, node_ids, elem_ids, elem_conn, elem_growth = \
+        parse_inp_growth_rates(inp_path)
+
+    # Node ID -> 0-based index
+    id_to_idx = np.empty(node_ids.max() + 1, dtype=int)
+    id_to_idx[:] = -1
+    id_to_idx[node_ids] = np.arange(len(node_ids))
+
+    # Element centroids
+    corner_idx = id_to_idx[elem_conn]
+    elem_coms = node_coords[corner_idx].mean(axis=1)
+
+    # Extract outer surface and map growth rates to surface faces
+    surface_verts, surface_tris, _, _, _ = parse_inp_surface(inp_path)
+    surface_face_coms = surface_verts[surface_tris].mean(axis=1)
+    tree = cKDTree(elem_coms)
+    _, nearest_elem = tree.query(surface_face_coms)
+    surface_growth = elem_growth[nearest_elem]
+
+    # Shared color range (exclude zeros = non-growth elements)
+    gr_nonzero = elem_growth[elem_growth != 0]
+    if len(gr_nonzero) > 0:
+        cmin, cmax = gr_nonzero.min(), gr_nonzero.max()
+    else:
+        cmin, cmax = elem_growth.min(), elem_growth.max()
+
+    fig = make_subplots(
+        rows=1, cols=2,
+        specs=[[{"type": "scene"}, {"type": "scene"}]],
+        subplot_titles=["Surface Growth Rate", "Solid Mesh Growth Rate"],
+    )
+
+    # Left: surface mesh colored by growth rate
+    fig.add_trace(
+        go.Mesh3d(
+            x=surface_verts[:, 0], y=surface_verts[:, 1], z=surface_verts[:, 2],
+            i=surface_tris[:, 0], j=surface_tris[:, 1], k=surface_tris[:, 2],
+            intensity=surface_growth,
+            intensitymode="cell",
+            colorscale="Jet",
+            cmin=cmin, cmax=cmax,
+            colorbar=dict(title="Growth Rate", x=0.45, len=0.8),
+            lighting=dict(ambient=0.6, diffuse=0.5),
+        ),
+        row=1, col=1,
+    )
+
+    # Right: solid mesh element COMs as scatter
+    fig.add_trace(
+        go.Scatter3d(
+            x=elem_coms[:, 0], y=elem_coms[:, 1], z=elem_coms[:, 2],
+            mode="markers",
+            marker=dict(
+                size=1.5,
+                color=elem_growth,
+                colorscale="Jet",
+                cmin=cmin, cmax=cmax,
+                colorbar=dict(title="Growth Rate", x=1.0, len=0.8),
+            ),
+        ),
+        row=1, col=2,
+    )
+
+    for scene in ["scene", "scene2"]:
+        fig.update_layout(**{scene: dict(
+            aspectmode="data",
+            xaxis=dict(visible=False),
+            yaxis=dict(visible=False),
+            zaxis=dict(visible=False),
+        )})
+
+    fig.update_layout(
+        title=inp_path.stem,
+        width=1400, height=600,
+        showlegend=False,
+    )
+
+    fig.write_html(str(output_path))
+    print(f"Saved growth visualization to {output_path}")
+    return fig
