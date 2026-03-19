@@ -5,8 +5,9 @@ ODB geometric analysis pipeline.
 Two stages, run on separate machines:
 
 1. **Abaqus extraction** (randi / HPC via ``abaqus python``):
-   ``extract_displacements()`` reads displacement fields from ODB files
-   and saves numpy arrays. Cannot run locally — requires Abaqus Python.
+   Use the standalone ``abaqus_extract_odb.py`` script to read field data
+   from ODB files and save numpy arrays. Cannot run locally — requires
+   Abaqus Python.
 
 2. **Local post-processing** (workstation):
    ``parse_inp_surface()``, ``extract_odb_geometry()``, ``smooth_mesh()``,
@@ -43,9 +44,9 @@ def extract_displacements(odb_path, step_name, instance_name, nset_name,
     **Requires the Abaqus Python environment** (``odbAccess``).
     Must be run on HPC (e.g. randi) via ``abaqus python``.
 
-    For each frame, node labels and displacements are extracted from the
-    field output values and sorted by node label (matching the MATLAB
-    ``sortrows([NodeList U],1)`` pattern from the original pipeline).
+    .. note::
+        Prefer the standalone ``abaqus_extract_odb.py`` script for HPC use.
+        It supports additional options (``--field``, ``--coords``).
 
     Parameters
     ----------
@@ -66,7 +67,7 @@ def extract_displacements(odb_path, step_name, instance_name, nset_name,
     -------
     Writes to ``output_dir``:
         - ``node_labels.npy`` — (M,) int array of node labels
-        - ``displacements_frame_XX.npy`` — (M, 3) float displacement per frame
+        - ``U_frame_XX.npy`` — (M, 3) float displacement per frame
         - ``metadata.json`` — extraction parameters and frame count
     """
     from odbAccess import openOdb  # only available in Abaqus Python
@@ -88,15 +89,22 @@ def extract_displacements(odb_path, step_name, instance_name, nset_name,
         if max_frames is not None:
             n_frames = min(n_frames, max_frames)
 
+        if n_frames == 0:
+            print("Warning: no frames found in step '%s'." % step_name)
+            odb.close()
+            return
+
+        pad = max(2, len(str(n_frames - 1)))
+        fmt = 'U_frame_%0' + str(pad) + 'd.npy'
+
         print("Extracting %d frames..." % n_frames)
 
-        node_labels_saved = False
+        node_labels = None
+        n_nodes = 0
         for i in range(n_frames):
             field = frames[i].fieldOutputs['U']
             subset = field.getSubset(region=nset)
 
-            # Extract labels and displacements, then sort by label
-            # (matches MATLAB: sU = sortrows([NodeList U], 1))
             frame_labels = np.array([v.nodeLabel for v in subset.values])
             frame_disp = np.array([v.dataDouble for v in subset.values])
 
@@ -104,20 +112,23 @@ def extract_displacements(odb_path, step_name, instance_name, nset_name,
             sorted_labels = frame_labels[sort_idx]
             sorted_disp = frame_disp[sort_idx]
 
-            if not node_labels_saved:
-                np.save(os.path.join(output_dir, 'node_labels.npy'), sorted_labels)
-                node_labels_saved = True
+            if node_labels is None:
+                node_labels = sorted_labels
+                n_nodes = len(node_labels)
+                np.save(os.path.join(output_dir, 'node_labels.npy'), node_labels)
 
-            np.save(os.path.join(output_dir, 'displacements_frame_%02d.npy' % i), sorted_disp)
-            print("  Frame %d/%d saved (%d nodes)" % (i + 1, n_frames, len(sorted_labels)))
+            np.save(os.path.join(output_dir, fmt % i), sorted_disp)
+            print("  Frame %d/%d (%d nodes)" % (i + 1, n_frames, n_nodes))
 
         metadata = {
             'odb_path': os.path.abspath(odb_path),
             'step_name': step_name,
             'instance_name': instance_name,
             'nset_name': nset_name,
+            'field_name': 'U',
             'n_frames': n_frames,
-            'n_nodes': len(node_labels),
+            'n_nodes': n_nodes,
+            'frame_pad': pad,
         }
         with open(os.path.join(output_dir, 'metadata.json'), 'w') as f:
             json.dump(metadata, f, indent=2)
@@ -312,8 +323,8 @@ def extract_odb_geometry(inp_path, extraction_dir, output_dir=None):
     inp_path : str or Path
         Path to the ``.inp`` file.
     extraction_dir : str or Path
-        Directory containing ``node_labels.npy``, ``displacements_frame_XX.npy``,
-        and ``metadata.json`` produced by ``extract_displacements()``.
+        Directory containing ``node_labels.npy``, frame ``.npy`` files,
+        and ``metadata.json`` produced by ``abaqus_extract_odb.py``.
     output_dir : str or Path or None
         Where to save per-frame STL files. Defaults to ``extraction_dir / stl``.
 
@@ -334,6 +345,8 @@ def extract_odb_geometry(inp_path, extraction_dir, output_dir=None):
     with open(extraction_dir / "metadata.json") as f:
         meta = json.load(f)
     n_frames = meta["n_frames"]
+    field_name = meta["field_name"]
+    pad = meta["frame_pad"]
 
     extracted_labels = np.load(extraction_dir / "node_labels.npy")
 
@@ -370,14 +383,14 @@ def extract_odb_geometry(inp_path, extraction_dir, output_dir=None):
 
     meshes = []
     for frame_i in range(n_frames):
-        disp_file = extraction_dir / f"displacements_frame_{frame_i:02d}.npy"
+        disp_file = extraction_dir / f"{field_name}_frame_{frame_i:0{pad}d}.npy"
         displacements = np.load(disp_file)
         deformed_verts = surface_verts + displacements[indices]
 
         mesh = trimesh.Trimesh(
             vertices=deformed_verts, faces=surface_tris, process=False
         )
-        mesh.export(str(output_dir / f"frame_{frame_i:02d}.stl"))
+        mesh.export(str(output_dir / f"frame_{frame_i:0{pad}d}.stl"))
         meshes.append(mesh)
 
     return meshes, surface_tris
@@ -447,6 +460,10 @@ def odb_geometric_analysis(
     if smooth_params is None:
         smooth_params = {}
 
+    with open(extraction_dir / "metadata.json") as f:
+        meta = json.load(f)
+    pad = meta["frame_pad"]
+
     meshes, _ = extract_odb_geometry(
         inp_path, extraction_dir, output_dir=output_dir / "stl_raw"
     )
@@ -465,6 +482,6 @@ def odb_geometric_analysis(
         triangles = pd.DataFrame(smoothed.faces, columns=["T1", "T2", "T3"])
         curvatures = pd.DataFrame(pcs, columns=["K1", "K2"])
         data = pd.concat([vertices, triangles, curvatures], axis=1)
-        data.to_parquet(mesh_dir / f"frame_{i:02d}.parquet", compression="gzip", index=False)
+        data.to_parquet(mesh_dir / f"frame_{i:0{pad}d}.parquet", compression="gzip", index=False)
 
     print(f"Saved {len(meshes)} parquet files to {mesh_dir}")
