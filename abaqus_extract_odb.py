@@ -64,10 +64,10 @@ def extract_fields(odb_path, step_name, instance_name, nset_name,
     -------
     Writes to *output_dir*:
 
-    - ``node_labels.npy``             — (M,) int, sorted node labels
-    - ``{field}_frame_XXXX.npy``      — (M, D) float, field values per frame
-    - ``coordinates.npy``             — (M, 3) float, initial coords (if ``--coords``)
-    - ``metadata.json``               — extraction parameters and file naming info
+    - ``node_labels.npy``             -- (M,) int, sorted node labels
+    - ``{field}_frame_XXXX.npy``      -- (M, D) float, field values per frame
+    - ``coordinates.npy``             -- (M, 3) float, initial coords (if ``--coords``)
+    - ``metadata.json``               -- extraction parameters and file naming info
     """
     if not os.path.isdir(output_dir):
         os.makedirs(output_dir)
