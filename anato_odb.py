@@ -462,14 +462,21 @@ def odb_geometric_analysis(
 
     with open(extraction_dir / "metadata.json") as f:
         meta = json.load(f)
+    n_frames = meta["n_frames"]
     pad = meta["frame_pad"]
+
+    mesh_dir = output_dir / "mesh"
+    mesh_dir.mkdir(parents=True, exist_ok=True)
+
+    # Check if all parquet files already exist
+    existing = [mesh_dir / f"frame_{i:0{pad}d}.parquet" for i in range(n_frames)]
+    if all(p.exists() for p in existing):
+        print(f"All {n_frames} parquet files already exist in {mesh_dir}, skipping.")
+        return
 
     meshes, _ = extract_odb_geometry(
         inp_path, extraction_dir, output_dir=output_dir / "stl_raw"
     )
-
-    mesh_dir = output_dir / "mesh"
-    mesh_dir.mkdir(parents=True, exist_ok=True)
 
     for i, mesh in enumerate(meshes):
         print(f"Processing frame {i + 1}/{len(meshes)}...")
