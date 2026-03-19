@@ -26,6 +26,7 @@ import json
 
 import numpy as np
 from odbAccess import openOdb
+from abaqusConstants import NODAL
 
 
 def _get_field_data(subset):
@@ -100,7 +101,7 @@ def extract_fields(odb_path, step_name, instance_name, nset_name,
         n_nodes = 0
         for i in range(n_frames):
             field = frames[i].fieldOutputs[field_name]
-            subset = field.getSubset(region=nset)
+            subset = field.getSubset(region=nset, position=NODAL)
 
             frame_labels = np.array([v.nodeLabel for v in subset.values])
             frame_data = _get_field_data(subset)
