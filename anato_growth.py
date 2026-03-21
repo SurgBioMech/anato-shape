@@ -1235,8 +1235,10 @@ def growth_mapping(
                     colormap=colormap,
                 )
 
-                # Compute changes per cluster (direct proportional area change)
-                area_changes = (final_As - initial_As) / initial_As
+                # Compute changes per cluster
+                area_changes = (np.sqrt(final_As) - np.sqrt(initial_As)) / np.sqrt(
+                    initial_As
+                )
                 intgaussian_changes = final_Ks - initial_Ks
 
                 # Define plot specs: (value_key, short_name)
@@ -1489,7 +1491,7 @@ def parse_inp_growth_rates(inp_path):
     return node_coords, node_ids, elem_ids, elem_connectivity, element_growth_rates
 
 
-def visualize_inp_growth(inp_path, output_path=None):
+def visualize_inp_growth(inp_path, output_path=None, cmin=None, cmax=None):
     """Visualize solid growth rates from a finalized growth INP file.
 
     Produces an interactive HTML figure showing solid mesh element centroids
@@ -1502,6 +1504,10 @@ def visualize_inp_growth(inp_path, output_path=None):
     output_path : str or Path or None
         Where to save the HTML file. Defaults to ``<inp_stem>_growth_viz.html``
         next to the INP file.
+    cmin : float or None
+        Minimum value for the color scale. If None, computed from the data.
+    cmax : float or None
+        Maximum value for the color scale. If None, computed from the data.
 
     Returns
     -------
@@ -1527,11 +1533,16 @@ def visualize_inp_growth(inp_path, output_path=None):
     elem_coms = node_coords[corner_idx].mean(axis=1)
 
     # Color range (exclude zeros = non-growth elements)
-    gr_nonzero = elem_growth[elem_growth != 0]
-    if len(gr_nonzero) > 0:
-        cmin, cmax = gr_nonzero.min(), gr_nonzero.max()
-    else:
-        cmin, cmax = elem_growth.min(), elem_growth.max()
+    if cmin is None or cmax is None:
+        gr_nonzero = elem_growth[elem_growth != 0]
+        if len(gr_nonzero) > 0:
+            auto_cmin, auto_cmax = gr_nonzero.min(), gr_nonzero.max()
+        else:
+            auto_cmin, auto_cmax = elem_growth.min(), elem_growth.max()
+        if cmin is None:
+            cmin = auto_cmin
+        if cmax is None:
+            cmax = auto_cmax
 
     fig = go.Figure()
 
