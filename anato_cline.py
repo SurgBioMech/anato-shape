@@ -332,7 +332,7 @@ def compute_centerline_from_mhd(
 
     # Spline smoothing
     if smoothing_factor is None:
-        smoothing_factor = len(raw_path) * (spacing_ds[0] * 1.5) ** 2
+        smoothing_factor = len(raw_path) * (spacing_ds[0] * 1.3) ** 2
 
     tck, u = splprep(
         [raw_path[:, 0], raw_path[:, 1], raw_path[:, 2]], s=smoothing_factor, k=3
