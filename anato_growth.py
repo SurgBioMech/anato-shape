@@ -1236,9 +1236,7 @@ def growth_mapping(
                 )
 
                 # Compute changes per cluster
-                area_changes = (np.sqrt(final_As) - np.sqrt(initial_As)) / np.sqrt(
-                    initial_As
-                )
+                area_changes = final_As - initial_As
                 intgaussian_changes = final_Ks - initial_Ks
 
                 # Define plot specs: (value_key, short_name)
