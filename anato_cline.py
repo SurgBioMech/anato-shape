@@ -45,12 +45,24 @@ def _safe_normalize(v, axis=-1, eps=1e-12):
 
 
 def _voxel_to_world(ijk, vox_spacing, offset):
-    """Convert voxel (k,j,i) coords to world (x,y,z)."""
-    world = np.zeros((len(ijk), 3), dtype=float)
-    world[:, 0] = ijk[:, 2] * vox_spacing[0] + offset[0]
-    world[:, 1] = ijk[:, 1] * vox_spacing[1] + offset[1]
-    world[:, 2] = ijk[:, 0] * vox_spacing[2] + offset[2]
-    return world
+    """Convert voxel (k,j,i) coords to world (x,y,z).
+
+    Formula: world[x,y,z] = [i,j,k] * spacing + offset
+    ijk from argwhere is (k,j,i); reversed to (i,j,k) for the dot product.
+    """
+    xyz = np.atleast_2d(ijk)[:, ::-1].astype(float) * vox_spacing
+    world = xyz + offset
+    return world if np.ndim(ijk) > 1 else world[0]
+
+
+def _world_to_voxel(world, vox_spacing, offset):
+    """Inverse of _voxel_to_world: world (x,y,z) -> voxel (k,j,i).
+
+    For direction vectors (not points), pass offset=np.zeros(3).
+    """
+    xyz = (np.atleast_2d(world).astype(float) - offset) / vox_spacing
+    ijk = xyz[:, ::-1]  # flip (i,j,k) -> (k,j,i)
+    return ijk if np.ndim(world) > 1 else ijk[0]
 
 
 def _skeleton_to_graph(skel_coords):
@@ -131,14 +143,9 @@ def _trace_to_edge(ep_idx, skel_ijk, skel_world, adj, mask, vox_spacing, offset,
     else:
         inward = np.array([0.0, 0.0, 1.0])
 
-    # Convert inward direction to voxel space (k, j, i)
-    inward_vox = np.array(
-        [
-            inward[2] / (abs(vox_spacing[2]) + 1e-12),
-            inward[1] / (abs(vox_spacing[1]) + 1e-12),
-            inward[0] / (abs(vox_spacing[0]) + 1e-12),
-        ]
-    )
+    # Convert inward world direction to voxel space (k, j, i)
+    # offset=0 because this is a direction vector, not a point
+    inward_vox = _world_to_voxel(inward, vox_spacing, np.zeros(3))
     # Outward = opposite of inward
     outward_vox = -inward_vox
 
@@ -191,15 +198,7 @@ def _trace_to_edge(ep_idx, skel_ijk, skel_world, adj, mask, vox_spacing, offset,
         else:
             break
 
-    # Convert final centroid [k, j, i] -> world [x, y, z]
-    centroid = np.array(
-        [
-            last_center[2] * vox_spacing[0] + offset[0],
-            last_center[1] * vox_spacing[1] + offset[1],
-            last_center[0] * vox_spacing[2] + offset[2],
-        ]
-    )
-    return centroid
+    return _voxel_to_world(last_center, vox_spacing, offset)
 
 
 def load_mhd(mhd_path):
@@ -305,15 +304,42 @@ def compute_centerline_from_mhd(
         endpoints = np.array([np.argmax(z_vals), np.argmin(z_vals)])
 
     # --- Identify the two tube endpoints ---
-    # Descending end: always the endpoint with lowest Z (bottom of candy cane).
-    # Ascending root: the endpoint farthest from descending by graph distance
-    # (this finds the other end of the main tube, not a branch tip).
-    ep_z = skel_world[endpoints, 2]
-    desc_node = endpoints[np.argmin(ep_z)]
+    # Cross-section area: tube cut-faces (large circular) >> branch tips (small).
+    def _cross_section_area(ep_idx):
+        path = [ep_idx]
+        cur = ep_idx
+        for _ in range(8):
+            nbrs = [n for n in adj[cur] if n not in path]
+            if not nbrs:
+                break
+            cur = nbrs[0]
+            path.append(cur)
+        inward = (skel_world[path[-1]] - skel_world[path[0]]
+                  if len(path) >= 2 else np.array([0., 0., 1.]))
+        dominant = int(np.argmax(np.abs(_world_to_voxel(inward, spacing_ds, np.zeros(3)))))
+        sk, sj, si = skel_ijk[ep_idx]
+        k = min(int(sk * ds), mask.shape[0] - 1)
+        j = min(int(sj * ds), mask.shape[1] - 1)
+        i = min(int(si * ds), mask.shape[2] - 1)
+        slices = [mask[k, :, :], mask[:, j, :], mask[:, :, i]]
+        return int(slices[dominant].sum())
 
-    desc_dist = _bfs_dist(adj, desc_node)
-    remaining = [ep for ep in endpoints if ep != desc_node]
-    asc_node = max(remaining, key=lambda ep: desc_dist[ep])
+    # Double-BFS graph diameter: finds the two topologically extreme nodes of
+    # the skeleton without any assumption about scan orientation.  For a tubular
+    # aorta skeleton these are the ascending root and the descending terminus —
+    # the descending end is the "deepest" terminus, reachable only by traversing
+    # the full ascending → arch → descending path.
+    dist0 = _bfs_dist(adj, 0)
+    u = int(np.argmax(dist0))
+    dist_u = _bfs_dist(adj, u)
+    v = int(np.argmax(dist_u))
+
+    # Assign ascending vs descending: the ascending root (sinuses of Valsalva)
+    # is the wider end of the thoracic aorta.
+    if _cross_section_area(u) >= _cross_section_area(v):
+        asc_node, desc_node = u, v
+    else:
+        asc_node, desc_node = v, u
 
     # Trace from each skeleton endpoint outward to the actual mask edge
     asc_edge = _trace_to_edge(
@@ -352,9 +378,7 @@ def compute_centerline_from_mhd(
 
     # Trim points that overshoot outside the mask
     def _inside(pt):
-        i = int(round((pt[0] - offset[0]) / vox_spacing[0]))
-        j = int(round((pt[1] - offset[1]) / vox_spacing[1]))
-        k = int(round((pt[2] - offset[2]) / vox_spacing[2]))
+        k, j, i = (int(round(x)) for x in _world_to_voxel(pt, vox_spacing, offset))
         if 0 <= k < mask.shape[0] and 0 <= j < mask.shape[1] and 0 <= i < mask.shape[2]:
             return mask[k, j, i]
         return False
@@ -368,10 +392,8 @@ def compute_centerline_from_mhd(
     cline_pos = cline_pos[lo : hi + 1]
     cline_div = cline_div[lo : hi + 1]
 
-    # Orient: ascending root first (higher Z of the two endpoints)
-    if cline_pos[0, 2] < cline_pos[-1, 2]:
-        cline_pos = cline_pos[::-1]
-        cline_div = -cline_div[::-1]
+    # Ordering: cline_pos[0] corresponds to asc_node, cline_pos[-1] to desc_node.
+    # No axis-based re-orientation — scan orientation cannot be assumed.
 
     # Extend each end along the spline tangent: walk until outside the
     # mask, then continue 3% of centerline length further.
@@ -411,5 +433,106 @@ def compute_centerline_from_mhd(
     cline_div[0] = cline_pos[1] - cline_pos[0]
     cline_div[-1] = cline_pos[-1] - cline_pos[-2]
     cline_div = _safe_normalize(cline_div)
+
+    return cline_pos, cline_div
+
+
+# ---------------------------------------------------------------------------
+# Mesh → MHD voxelization helper
+# ---------------------------------------------------------------------------
+
+
+def _write_mhd(volume, spacing, offset, mhd_path):
+    """Write a binary uint8 volume to an MHD + raw file pair.
+
+    Parameters
+    ----------
+    volume : np.ndarray, shape (Z, Y, X), dtype uint8
+    spacing : array-like, shape (3,)  — voxel spacing (x, y, z)
+    offset  : array-like, shape (3,)  — world-coordinate origin (x, y, z)
+    mhd_path : Path  — path to write the .mhd header (raw file placed alongside)
+    """
+    mhd_path = Path(mhd_path)
+    raw_path = mhd_path.with_suffix(".raw")
+    volume.astype(np.uint8).tofile(raw_path)
+    dz, dy, dx = volume.shape
+    sx, sy, sz = spacing
+    ox, oy, oz = offset
+    header = (
+        f"NDims = 3\n"
+        f"DimSize = {dx} {dy} {dz}\n"
+        f"ElementSpacing = {sx} {sy} {sz}\n"
+        f"Offset = {ox} {oy} {oz}\n"
+        f"ElementType = MET_UCHAR\n"
+        f"ElementDataFile = {raw_path.name}\n"
+    )
+    mhd_path.write_text(header)
+
+
+def compute_centerline_from_parquet(
+    parquet_path,
+    n_points=1200,
+    spacing=None,
+    smoothing_factor=None,
+    voxel_pitch=0.4,
+    downsample=3,
+):
+    """Compute centerline from a parquet surface mesh.
+
+    Voxelizes the mesh at *voxel_pitch* mm resolution, writes a temporary MHD
+    volume, runs compute_centerline_from_mhd, then removes the temp files.
+
+    Parameters
+    ----------
+    parquet_path : str or Path
+    n_points : int
+        Number of uniformly spaced output points (default 1200).
+    spacing : float, optional
+        Uniform spacing between output points (mm). Overrides *n_points*.
+    smoothing_factor : float, optional
+        Spline smoothing. Auto-calibrated if None.
+    voxel_pitch : float
+        Voxel size in mm used for mesh → volume conversion (default 0.75).
+    downsample : int
+        Downsample factor passed to compute_centerline_from_mhd (default 3).
+
+    Returns
+    -------
+    cline_pos : np.ndarray, shape (N, 3)
+    cline_div : np.ndarray, shape (N, 3)
+    """
+    import tempfile, shutil
+
+    parquet_path = Path(parquet_path)
+    mesh = GetMeshFromParquet(str(parquet_path))
+
+    # Ensure watertight mesh for voxelization
+    tm = trimesh.Trimesh(vertices=mesh.vertices, faces=mesh.faces, process=False)
+    if not tm.is_watertight:
+        trimesh.repair.fill_holes(tm)
+
+    # Voxelize: trimesh returns a VoxelGrid in local (mesh) coordinates
+    vg = tm.voxelized(pitch=voxel_pitch).fill()
+    volume = vg.matrix.astype(np.uint8)   # shape (X, Y, Z) in trimesh convention
+
+    # trimesh VoxelGrid uses (i, j, k) = (x, y, z) ordering; transpose to (Z, Y, X)
+    volume = volume.transpose(2, 1, 0)
+
+    spacing_xyz = np.array([voxel_pitch, voxel_pitch, voxel_pitch])
+    offset_xyz = vg.translation  # world coordinate of voxel (0,0,0)
+
+    tmp_dir = Path(tempfile.mkdtemp())
+    mhd_path = tmp_dir / (parquet_path.stem + "_vox.mhd")
+    try:
+        _write_mhd(volume, spacing_xyz, offset_xyz, mhd_path)
+        cline_pos, cline_div = compute_centerline_from_mhd(
+            mhd_path,
+            n_points=n_points,
+            spacing=spacing,
+            smoothing_factor=smoothing_factor,
+            downsample=downsample,
+        )
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
     return cline_pos, cline_div
